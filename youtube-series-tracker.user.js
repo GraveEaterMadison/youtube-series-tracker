@@ -1,8 +1,13 @@
 // ==UserScript==
 // @name         YouTube Series — Morphe-inspired
 // @namespace    https://local-series-tracker.invalid/
-// @version      2.0.0
-// @description  Playlist-based series library for YouTube with full-playlist sync, episode progress, history matching, continue watching, and optional auto-next.
+// @version      2.0.1
+// @description  Track YouTube playlists as series with local episode progress, watched status, continue watching, history matching, and optional auto-next.
+// @author       Zero
+// @license      MIT
+// @homepageURL  https://github.com/GraveEaterMadison/youtube-series-tracker
+// @supportURL   https://github.com/GraveEaterMadison/youtube-series-tracker/issues
+// @compatible   firefox
 // @match        https://www.youtube.com/*
 // @run-at       document-idle
 // @grant        none
