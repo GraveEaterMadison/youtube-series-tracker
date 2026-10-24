@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube Series Tracker
 // @namespace    https://github.com/GraveEaterMadison/youtube-series-tracker
-// @version      2.1.0
-// @description  Track YouTube playlists as series from the player button or sidebar, with local episode progress, watched status, history matching, and optional auto-next.
+// @version      2.2.0
+// @description  Build YouTube series from playlists or add individual videos, with local progress, watched status, history matching, and optional auto-next.
 // @author       Zero
 // @license      MIT
 // @homepageURL  https://github.com/GraveEaterMadison/youtube-series-tracker
@@ -238,7 +238,10 @@
     // Preserve YouTube order as provided by the playlist renderer.
     return { items, title: titleFromData(data) || playlistTitleFromDOM(), pages };
   }
-  function findSeries(id) { return db.series.find(s => s.playlistId === id || s.id === id); }
+  function findSeries(id) {
+    if (!id) return undefined;
+    return db.series.find(s => (s.playlistId && s.playlistId === id) || s.id === id);
+  }
   function mergeSeries(listId, title, items) {
     let series = findSeries(listId);
     if (!series) {
@@ -255,7 +258,7 @@
       setState(ep.id, { title: ep.title || st.title, duration: ep.duration || st.duration });
     });
     // Keep previously-known items that may be unavailable/removed, at the end.
-    for (const [id, ep] of old) if (!merged.some(x => x.id === id)) merged.push({ ...ep, order: merged.length, unavailable: true });
+    for (const [id, ep] of old) if (!merged.some(x => x.id === id)) merged.push({ ...ep, order: merged.length, unavailable: ep.manuallyAdded ? false : true });
     series.title = title || series.title;
     series.episodes = merged;
     series.updatedAt = Date.now();
@@ -311,7 +314,7 @@
   function openEpisode(s, e, resume = true) {
     if (!s || !e) return;
     const st = stateFor(e.id);
-    location.href = urlFor(e.id, s.playlistId, e.order, resume && !st.watched ? st.position : 0);
+    location.href = urlFor(e.id, s.playlistId, s.playlistId ? e.order : undefined, resume && !st.watched ? st.position : 0);
   }
   function markEpisode(id, watched) {
     const st = stateFor(id);
@@ -329,11 +332,122 @@
       <button class="yst2-mark ${st.watched?'checked':''}" data-mark="${esc(e.id)}" title="${st.watched?'Mark unwatched':'Mark watched'}">${st.watched?'✓':'○'}</button>
     </article>`;
   }
+  function saveVideoToSeries(series, meta) {
+    if (!series || !meta) return false;
+    if (series.episodes.some(ep => ep.id === meta.id)) {
+      toast('This video is already in "' + series.title + '".');
+      return false;
+    }
+    const order = series.episodes.reduce((max, ep) => Math.max(max, Number.isFinite(ep.order) ? ep.order : -1), -1) + 1;
+    series.episodes.push({ ...meta, order, manuallyAdded: true });
+    series.updatedAt = Date.now();
+    const old = stateFor(meta.id);
+    setState(meta.id, { title: meta.title || old.title, duration: meta.duration || old.duration });
+    saveDB();
+    document.getElementById('yst2-add-video-dialog')?.remove();
+    renderPanel();
+    toast('Added "' + meta.title + '" to "' + series.title + '".');
+    return true;
+  }
+
+  function createManualSeries(title, meta) {
+    const cleanTitle = String(title || '').trim();
+    if (!cleanTitle) {
+      toast('Enter a name for the new series.');
+      return false;
+    }
+    if (!meta) {
+      toast('Open a YouTube video before creating a series.');
+      return false;
+    }
+    let id = 'manual-' + Date.now().toString(36) + '-' + meta.id;
+    while (db.series.some(series => series.id === id)) id += '-x';
+    const series = {
+      id: id,
+      playlistId: null,
+      manual: true,
+      title: cleanTitle,
+      episodes: [],
+      addedAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    db.series.unshift(series);
+    series.episodes.push({ ...meta, order: 0, manuallyAdded: true });
+    const old = stateFor(meta.id);
+    setState(meta.id, { title: meta.title || old.title, duration: meta.duration || old.duration });
+    saveDB();
+    document.getElementById('yst2-add-video-dialog')?.remove();
+    renderPanel();
+    toast('Created "' + cleanTitle + '" with its first video.');
+    return true;
+  }
+
+  function showAddVideoDialog() {
+    const meta = videoMeta();
+    if (!meta) {
+      toast('Open a YouTube video first, then add it to a series.');
+      return;
+    }
+    const panel = document.getElementById(PANEL);
+    if (!panel) return;
+    panel.querySelector('#yst2-add-video-dialog')?.remove();
+    const options = db.series.map(series =>
+      '<option value="' + esc(series.id) + '">' + esc(series.title) + ' (' + series.episodes.length + ' videos)</option>'
+    ).join('');
+    const modal = document.createElement('div');
+    modal.id = 'yst2-add-video-dialog';
+    modal.className = 'yst2-modal-backdrop';
+    modal.innerHTML =
+      '<section class="yst2-modal" role="dialog" aria-modal="true" aria-labelledby="yst2-dialog-title">' +
+        '<header class="yst2-modal-head">' +
+          '<div><h3 id="yst2-dialog-title">Add video to a series</h3>' +
+          '<p class="yst2-muted">Add this video now, then repeat from other videos to build your own order.</p></div>' +
+          '<button type="button" id="yst2-dialog-close" class="yst2-icon" aria-label="Close">×</button>' +
+        '</header>' +
+        '<div class="yst2-current-video"><img src="' + esc(meta.thumb) + '" alt="">' +
+          '<div><strong>' + esc(meta.title) + '</strong><span>Current YouTube video</span></div></div>' +
+        '<label class="yst2-dialog-label" for="yst2-existing-series">Add to an existing series</label>' +
+        '<select id="yst2-existing-series" class="yst2-dialog-select">' +
+          '<option value="">Choose a series…</option>' + options +
+        '</select>' +
+        '<button type="button" id="yst2-add-existing" class="yst2-mainbtn" disabled>Add video to selected series</button>' +
+        '<div class="yst2-modal-or"><span>or create a new series</span></div>' +
+        '<label class="yst2-dialog-label" for="yst2-new-series-title">New series name</label>' +
+        '<input id="yst2-new-series-title" class="yst2-dialog-input" type="text" maxlength="160" placeholder="e.g. My physics lectures">' +
+        '<button type="button" id="yst2-create-series" class="yst2-mainbtn">Create series with this video</button>' +
+        '<button type="button" id="yst2-dialog-cancel" class="yst2-subbtn yst2-dialog-cancel">Cancel</button>' +
+      '</section>';
+    panel.appendChild(modal);
+
+    const select = modal.querySelector('#yst2-existing-series');
+    const addButton = modal.querySelector('#yst2-add-existing');
+    const titleInput = modal.querySelector('#yst2-new-series-title');
+    select.addEventListener('change', () => { addButton.disabled = !select.value; });
+    addButton.addEventListener('click', () => {
+      const series = db.series.find(item => item.id === select.value);
+      saveVideoToSeries(series, meta);
+    });
+    modal.querySelector('#yst2-create-series').addEventListener('click', () => {
+      if (!titleInput.value.trim()) {
+        titleInput.focus();
+        toast('Enter a name for the new series.');
+        return;
+      }
+      createManualSeries(titleInput.value, meta);
+    });
+    const close = () => modal.remove();
+    modal.querySelector('#yst2-dialog-close').addEventListener('click', close);
+    modal.querySelector('#yst2-dialog-cancel').addEventListener('click', close);
+    modal.addEventListener('click', event => { if (event.target === modal) close(); });
+    modal.addEventListener('keydown', event => { if (event.key === 'Escape') close(); });
+    titleInput.focus();
+  }
+
   function seriesHTML(s) {
     const st = stats(s), cont = chooseContinue(s);
     return `<section class="yst2-series">
       <header class="yst2-serieshead"><div class="yst2-seriestitle">${esc(s.title)}</div>
-      <button class="yst2-icon" data-sync="${esc(s.id)}" title="Refresh entire playlist">↻</button>
+      ${s.playlistId ? '<button class="yst2-icon" data-sync="${esc(s.id)}" title="Refresh entire playlist">↻</button>' : '<span class="yst2-manual-label">Manual series</span>'}
       <button class="yst2-icon" data-edit="${esc(s.id)}" title="Rename series">✎</button>
       <button class="yst2-icon danger" data-remove="${esc(s.id)}" title="Remove series">×</button></header>
       <div class="yst2-muted">${st.watched}/${st.total} watched · ${st.pct}% complete · ${st.active} in progress${st.left?` · ${fmt(st.left)} remaining`:''}</div>
@@ -351,13 +465,13 @@
     const allCont = db.series.map(s=>({s,e:chooseContinue(s)})).filter(x=>x.e);
     let body = '';
     if (activeTab === 'library') body = db.series.length ? db.series.map(seriesHTML).join('') :
-      `<div class="yst2-empty"><div class="symbol">▤</div><h3>Your series library is empty</h3><p>Open a YouTube playlist and select <b>Sync full playlist</b>. The script will load playlist continuation pages where YouTube exposes them.</p></div>`;
+      `<div class="yst2-empty"><div class="symbol">▤</div><h3>Your series library is empty</h3><p>Open a YouTube playlist and select <b>Sync full playlist</b>, or play a video and use <b>Add current video</b> to start a series manually.</p></div>`;
     if (activeTab === 'continue') body = allCont.length ? allCont.map(({s,e})=>`<section class="yst2-series"><div class="yst2-muted">${esc(s.title)}</div>${episodeHTML(s,e)}<button class="yst2-continue" data-continue="${esc(s.id)}">▶ Resume / play next</button></section>`).join('') :
       `<div class="yst2-empty"><h3>Nothing to continue</h3><p>Start watching a series episode and progress will appear here.</p></div>`;
     if (activeTab === 'history') body = renderHistory();
     if (activeTab === 'settings') body = settingsHTML();
     p.innerHTML = `<div class="yst2-top"><div><div class="yst2-logo">Series</div><div class="yst2-muted">${db.series.length} series · ${watched}/${total} episodes watched</div></div><button id="yst2-close" class="yst2-icon">×</button></div>
-      <div class="yst2-actions"><button id="yst2-sync" class="yst2-mainbtn">＋ Sync full playlist</button><button id="yst2-export" class="yst2-subbtn">Export</button><button id="yst2-import" class="yst2-subbtn">Import</button></div>
+      <div class="yst2-actions"><button id="yst2-add-current" class="yst2-mainbtn">＋ Add current video</button><button id="yst2-sync" class="yst2-subbtn">Sync full playlist</button><button id="yst2-export" class="yst2-subbtn">Export</button><button id="yst2-import" class="yst2-subbtn">Import</button></div>
       <nav class="yst2-tabs">${[['library','Library'],['continue','Continue'],['history','History'],['settings','Settings']].map(([k,v])=>`<button data-tab="${k}" class="${activeTab===k?'active':''}">${v}</button>`).join('')}</nav>
       <div class="yst2-content">${body}</div><footer class="yst2-footer">Local-only tracker · ${db.lastSync?`Last playlist sync ${new Date(db.lastSync).toLocaleString()}`:'No playlist sync yet'}</footer>`;
     bindPanel();
@@ -383,6 +497,7 @@
   function bindPanel() {
     const p = document.getElementById(PANEL);
     p.querySelector('#yst2-close')?.addEventListener('click', closePanel);
+    p.querySelector('#yst2-add-current')?.addEventListener('click', showAddVideoDialog);
     p.querySelector('#yst2-sync')?.addEventListener('click', syncCurrentPlaylist);
     p.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>{activeTab=b.dataset.tab;renderPanel();if(activeTab==='history')scanHistoryPage();}));
     p.querySelectorAll('[data-play]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.sid),e=s?.episodes.find(x=>x.id===b.dataset.play);if(s&&e)openEpisode(s,e);}));
@@ -499,14 +614,11 @@
       return;
     }
 
-    const existing = videoId
-      ? db.series.find(series => series.episodes.some(episode => episode.id === videoId))
-      : null;
-    if (existing) {
-      toast('This episode belongs to "' + existing.title + '".');
+    if (videoId) {
+      showAddVideoDialog();
       return;
     }
-    toast('To add a series, open a playlist or play a video whose URL contains list=.');
+    toast('Open a YouTube video to add it to a series.');
   }
 
   function ensureUI() {
@@ -529,7 +641,7 @@
       #${PANEL}.open{display:flex;flex-direction:column}#${PANEL} *{box-sizing:border-box}#${PANEL} button{font:inherit;cursor:pointer}
       .yst2-top{display:flex;justify-content:space-between;align-items:center;padding:17px 18px 12px;border-bottom:1px solid #292a30}
       .yst2-logo{font-size:25px;font-weight:800;letter-spacing:-.8px}.yst2-muted{color:#a5a6b0;font-size:11px}
-      .yst2-actions{display:flex;gap:7px;padding:11px 14px}.yst2-mainbtn,.yst2-subbtn,.yst2-icon{border:0;border-radius:9px;padding:9px 11px}
+      .yst2-actions{display:flex;gap:7px;padding:11px 14px;flex-wrap:wrap}.yst2-mainbtn,.yst2-subbtn,.yst2-icon{border:0;border-radius:9px;padding:9px 11px}
       .yst2-mainbtn{background:#ff1744;color:white;font-weight:700}.yst2-subbtn,.yst2-icon{background:#292a31;color:#f0f0f3}.yst2-icon{padding:3px 8px;font-size:18px}.yst2-icon.danger{color:#ff808f}
       .yst2-tabs{display:flex;gap:3px;padding:0 12px 10px;border-bottom:1px solid #292a30}.yst2-tabs button{border:0;background:transparent;color:#a8a8b1;padding:8px 10px;border-radius:8px;font-size:12px}.yst2-tabs button.active{background:#2a2b32;color:white}
       .yst2-content{overflow:auto;flex:1;min-height:0;padding:12px 14px}.yst2-series{background:#191a20;border:1px solid #303139;border-radius:12px;padding:12px;margin-bottom:12px}
@@ -543,6 +655,21 @@
       .yst2-empty{text-align:center;padding:42px 16px;color:#ddd}.yst2-empty h3{margin:10px 0 5px}.yst2-empty p{color:#a5a6b0;font-size:12px}.yst2-empty .symbol{font-size:38px;color:#ff1744}
       .yst2-setting{display:flex;align-items:center;gap:8px;margin:13px 0;font-size:12px}.yst2-setting select{margin-left:auto;background:#292a31;color:#eee;border:1px solid #444;border-radius:6px;padding:5px}
       .yst2-setting input{accent-color:#ff1744}.dangerbtn{color:#ff8b9b}.yst2-footer{padding:10px 15px;border-top:1px solid #292a30;color:#8d8f99;font-size:10px}
+      .yst2-manual-label{font-size:10px;color:#a5a6b0;margin-left:auto}
+      .yst2-modal-backdrop{position:absolute;inset:0;z-index:10;background:#000b;display:flex;align-items:center;justify-content:center;padding:16px}
+      .yst2-modal{width:100%;max-width:390px;max-height:100%;overflow:auto;background:#191a20;border:1px solid #444650;border-radius:14px;box-shadow:0 18px 60px #000c;padding:15px}
+      .yst2-modal-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:12px}
+      .yst2-modal-head h3{margin:0 0 4px;font-size:17px}.yst2-modal-head p{margin:0;line-height:1.4}
+      .yst2-current-video{display:flex;align-items:center;gap:10px;padding:9px;background:#24252c;border-radius:9px;margin-bottom:15px;min-width:0}
+      .yst2-current-video img{width:92px;aspect-ratio:16/9;object-fit:cover;border-radius:6px;flex:none}
+      .yst2-current-video div{min-width:0;display:flex;flex-direction:column;gap:4px}.yst2-current-video strong{font-size:12px;line-height:1.35;overflow-wrap:anywhere}.yst2-current-video span{font-size:10px;color:#a5a6b0}
+      .yst2-dialog-label{display:block;margin:10px 0 6px;font-size:12px;color:#dadbe1}
+      .yst2-dialog-select,.yst2-dialog-input{width:100%;border:1px solid #454650;border-radius:8px;background:#101116;color:#f4f4f5;padding:10px;font:inherit;margin-bottom:9px}
+      .yst2-modal .yst2-mainbtn,.yst2-modal .yst2-subbtn{width:100%;padding:10px;margin:2px 0}
+      .yst2-modal button:disabled{opacity:.42;cursor:not-allowed}
+      .yst2-modal-or{display:flex;align-items:center;gap:10px;margin:14px 0;color:#a5a6b0;font-size:11px}
+      .yst2-modal-or:before,.yst2-modal-or:after{content:"";height:1px;background:#383941;flex:1}
+      .yst2-dialog-cancel{margin-top:7px!important}
       #${BTN}{display:flex;align-items:center;gap:20px;width:100%;padding:10px 12px;border:0;border-radius:10px;background:transparent;color:var(--yt-spec-text-primary,#f1f1f1);font:500 14px Roboto,Arial,sans-serif;cursor:pointer}
       #${BTN}:hover{background:var(--yt-spec-10-percent-layer,#272727)}#${BTN} svg{width:24px;height:24px;fill:currentColor;flex:none}
       #${BTN}.floating{position:fixed;z-index:999990;left:12px;bottom:18px;width:auto;background:#ff1744;color:white;border-radius:22px;padding:10px 15px;box-shadow:0 5px 20px #0007}
