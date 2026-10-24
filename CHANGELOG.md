@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.1
+
+- Use a unique default name when a new manual series is created with a blank name, starting with “New Series”.
+- Explain in the dialog that the series name is optional.
+- Add regression coverage for the default-name behavior.
+
 ## 2.2.0
 
 - Add the current YouTube video to an existing series with an explicit selector.
