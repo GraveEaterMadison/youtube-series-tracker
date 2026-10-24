@@ -4,7 +4,8 @@
 
 - Fix auto-next so it stops instead of repeating a watched episode when no unwatched episode remains later in the series.
 - Batch playback, playlist-refresh, history-scan, and mark-all updates to reduce repeated synchronous localStorage serialization.
-- Add executable regression tests for auto-next ordering and batched writes.
+- Add executable regression tests for auto-next ordering, batched writes, and video-listener cleanup.
+- Detach the previous episode's playback handlers when YouTube reuses its video element during SPA navigation.
 
 ## 2.2.1
 
