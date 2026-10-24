@@ -1,0 +1,37 @@
+name: Bug report
+description: Report a reproducible problem with the userscript
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Do not include cookies, account tokens, or private watch-history exports."
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Include expected and actual behavior.
+    validations:
+      required: true
+  - type: input
+    id: firefox
+    attributes:
+      label: Firefox version
+    validations:
+      required: true
+  - type: input
+    id: manager
+    attributes:
+      label: Userscript manager and version
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: console
+    attributes:
+      label: Relevant console errors (redact private data)
