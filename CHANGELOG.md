@@ -1,13 +1,13 @@
 # Changelog
 
-## Unreleased
+## 2.0.1
 
-- Published the initial beta userscript and install instructions.
-- Added Node.js syntax check and automated metadata/privacy smoke tests.
-- Added GitHub Actions CI for pushes and pull requests.
-- Added tagged GitHub Release workflow that attaches the standalone userscript.
-- Added contribution/security guidance and issue/PR templates.
+- Prepare the userscript metadata for Greasy Fork publication.
+- Add MIT license, homepage, support URL, and Firefox compatibility metadata.
+- Keep the package version aligned with the userscript version and verify this in CI.
 
-## 0.1.0
+## 2.0.0
 
-- Initial public repository scaffold and beta userscript.
+- Playlist-based series library with playlist synchronization, episode progress, history matching, continue watching, and optional auto-next.
+- Local browser storage with backup/restore tools.
+- Add syntax checks, metadata/privacy smoke tests, and GitHub Actions workflows.
