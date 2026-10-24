@@ -50,6 +50,13 @@ test('one-by-one series builder actions are wired and versioned', () => {
   assert.match(source, /unavailable: ep\.manuallyAdded \? false : true/);
 });
 
+test('player button prioritizes adding the current video and keeps a playlist-sync option', () => {
+  const fromPlayer = source.slice(source.indexOf('function openFromPlayer()'), source.indexOf('function ensureUI()'));
+  assert.ok(fromPlayer.indexOf('if (videoId)') < fromPlayer.indexOf('if (listId)'));
+  assert.match(source, /id="yst2-dialog-sync-playlist"/);
+  assert.match(source, /Sync the entire current playlist instead/);
+});
+
 test('manual series does not require a playlist ID', () => {
   assert.match(source, /playlistId: null,\s+manual: true/);
   assert.match(source, /if \(!id\) return undefined/);
