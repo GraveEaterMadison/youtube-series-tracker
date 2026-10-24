@@ -41,13 +41,21 @@ test('sidebar button relocates when YouTube navigation loads after the userscrip
 });
 
 test('one-by-one series builder actions are wired and versioned', () => {
-  assert.match(source, /^\/\/ @version\s+2\.2\.0$/m);
+  assert.match(source, /^\/\/ @version\s+2\.2\.1$/m);
   assert.match(source, /id="yst2-add-current"/);
   assert.match(source, /function showAddVideoDialog\(\)/);
   assert.match(source, /function saveVideoToSeries\(series, meta\)/);
   assert.match(source, /function createManualSeries\(title, meta\)/);
   assert.match(source, /manuallyAdded: true/);
   assert.match(source, /unavailable: ep\.manuallyAdded \? false : true/);
+});
+
+test('blank series names receive a unique default name', () => {
+  assert.match(source, /function defaultManualSeriesName\(\)/);
+  assert.match(source, /String\(title \|\| ''\)\.trim\(\) \|\| defaultManualSeriesName\(\)/);
+  assert.match(source, /placeholder="Optional — defaults to New Series"/);
+  assert.doesNotMatch(source, /Enter a name for the new series/);
+  assert.match(source, /while \(names\.has\('\?'\)\) suffix\+\+/);
 });
 
 test('player button prioritizes adding the current video and keeps a playlist-sync option', () => {
