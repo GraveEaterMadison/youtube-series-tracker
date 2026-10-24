@@ -2,6 +2,12 @@
 
 ## Unreleased
 
-- Initial public-repository packaging of the beta userscript.
-- Add Node syntax check and metadata/core smoke tests.
-- Add GitHub Actions CI, contribution guidance, issue template, and pull request template.
+- Published the initial beta userscript and install instructions.
+- Added Node.js syntax check and automated metadata/privacy smoke tests.
+- Added GitHub Actions CI for pushes and pull requests.
+- Added tagged GitHub Release workflow that attaches the standalone userscript.
+- Added contribution/security guidance and issue/PR templates.
+
+## 0.1.0
+
+- Initial public repository scaffold and beta userscript.
