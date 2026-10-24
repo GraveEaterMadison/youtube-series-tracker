@@ -151,5 +151,6 @@ test('video listeners are detached before tracking a new YouTube route', () => {
   assert.ok(track.indexOf('if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;}') < track.indexOf('video.addEventListener'), 'previous listeners should be removed before handlers are attached');
   assert.match(track, /video\.removeEventListener\('timeupdate',onTime\)/);
   assert.match(track, /video\.removeEventListener\('ended',onEnded\)/);
+  assert.match(track, /if\(!meta\|\|!video\)\{\s*if\(activeVideoCleanup\)/);
   assert.doesNotMatch(source, /const listenerVideos = new WeakSet\(\)/);
 });
