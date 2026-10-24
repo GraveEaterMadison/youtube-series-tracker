@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.2.0
+
+- Add the current YouTube video to an existing series with an explicit selector.
+- Create a new manual series from the current video, then add other videos one at a time.
+- Preserve manually-added episodes across playlist refreshes and distinguish manual series from playlist-synced series.
+- Add regression checks for the one-by-one series workflow.
+
 ## 2.1.0
 
 - Add a Series Tracker button to the YouTube desktop player's top controls as well as the existing sidebar/floating entry.
