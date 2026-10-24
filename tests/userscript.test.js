@@ -40,6 +40,21 @@ test('sidebar button relocates when YouTube navigation loads after the userscrip
   assert.match(source, /button\.classList\.remove\('floating'\)/);
 });
 
+test('one-by-one series builder actions are wired and versioned', () => {
+  assert.match(source, /^\/\/ @version\s+2\.2\.0$/m);
+  assert.match(source, /id="yst2-add-current"/);
+  assert.match(source, /function showAddVideoDialog\(\)/);
+  assert.match(source, /function saveVideoToSeries\(series, meta\)/);
+  assert.match(source, /function createManualSeries\(title, meta\)/);
+  assert.match(source, /manuallyAdded: true/);
+  assert.match(source, /unavailable: ep\.manuallyAdded \? false : true/);
+});
+
+test('manual series does not require a playlist ID', () => {
+  assert.match(source, /playlistId: null,\s+manual: true/);
+  assert.match(source, /if \(!id\) return undefined/);
+});
+
 test('core series-tracking concepts remain present', () => {
   for (const concept of ['localStorage', 'playlist', 'watched', 'export', 'import']) {
     assert.ok(source.toLowerCase().includes(concept.toLowerCase()), 'Expected source to contain ' + concept);
