@@ -24,6 +24,15 @@ test('version and Greasy Fork listing metadata are complete and consistent', () 
   assert.match(source, /^\/\/ @supportURL\s+https:\/\/github\.com\/GraveEaterMadison\/youtube-series-tracker\/issues$/m);
 });
 
+test('Morphe-inspired player entry point is present and styled with real CSS newlines', () => {
+  assert.match(source, /const PLAYER_BTN = 'yst2-player-button'/);
+  assert.match(source, /function addPlayerButton\(\)/);
+  assert.match(source, /querySelector\('#movie_player'\)/);
+  assert.match(source, /\.ytp-chrome-top-buttons/);
+  assert.match(source, /function openFromPlayer\(\)/);
+  assert.doesNotMatch(source, /vertical-align:top\}\\n/);
+});
+
 test('core series-tracking concepts remain present', () => {
   for (const concept of ['localStorage', 'playlist', 'watched', 'export', 'import']) {
     assert.ok(source.toLowerCase().includes(concept.toLowerCase()), 'Expected source to contain ' + concept);
