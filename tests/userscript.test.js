@@ -16,11 +16,11 @@ test('userscript metadata targets YouTube and requests no privileged grants', ()
 
 test('version and Greasy Fork listing metadata are complete and consistent', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-  const version = source.match(/^\/\/ @version\\s+(.+)$/m)?.[1]?.trim();
+  const version = source.match(/^\/\/ @version\s+(.+)$/m)?.[1]?.trim();
   assert.equal(version, pkg.version);
-  assert.match(source, /^\/\/ @license\\s+MIT$/m);
-  assert.match(source, /^\/\/ @homepageURL\\s+https:\/\/github\\.com\/GraveEaterMadison\/youtube-series-tracker$/m);
-  assert.match(source, /^\/\/ @supportURL\\s+https:\/\/github\\.com\/GraveEaterMadison\/youtube-series-tracker\/issues$/m);
+  assert.match(source, /^\/\/ @license\s+MIT$/m);
+  assert.match(source, /^\/\/ @homepageURL\s+https:\/\/github\.com\/GraveEaterMadison\/youtube-series-tracker$/m);
+  assert.match(source, /^\/\/ @supportURL\s+https:\/\/github\.com\/GraveEaterMadison\/youtube-series-tracker\/issues$/m);
 });
 
 test('core series-tracking concepts remain present', () => {
