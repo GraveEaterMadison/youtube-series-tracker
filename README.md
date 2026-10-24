@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/GraveEaterMadison/youtube-series-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/GraveEaterMadison/youtube-series-tracker/actions/workflows/ci.yml)
 
+**Install:** [YouTube Series Tracker on Greasy Fork](https://greasyfork.org/en/scripts/601970-youtube-series-tracker) · [Raw userscript source](https://raw.githubusercontent.com/GraveEaterMadison/youtube-series-tracker/main/youtube-series-tracker.user.js)
+
 A local-first Firefox userscript for tracking YouTube playlists as series: episode progress, a series library, continue-watching, history matching, and backup/restore.
 
 > **Project status: beta.**  YouTube's internal page structures can change without notice.
@@ -60,3 +62,4 @@ This is an independent, unofficial project inspired by the general idea of serie
 ## License
 
 MIT. See LICENSE.
+
