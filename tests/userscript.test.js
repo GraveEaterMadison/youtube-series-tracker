@@ -144,3 +144,12 @@ test('playlist refresh and history scan can batch state changes into one write',
   assert.match(mergeSeries, /setState\(ep\.id,\s*\{[^}]+\},\s*false\)/);
   assert.match(historyScan, /setState\(id,\s*\{watched:true\},\s*false\)/);
 });
+
+test('video listeners are detached before tracking a new YouTube route', () => {
+  assert.match(source, /let activeVideoCleanup = null/);
+  const track = source.slice(source.indexOf('function trackCurrentVideo()'), source.indexOf('function routeChanged()'));
+  assert.ok(track.indexOf('if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;}') < track.indexOf('video.addEventListener'), 'previous listeners should be removed before handlers are attached');
+  assert.match(track, /video\.removeEventListener\('timeupdate',onTime\)/);
+  assert.match(track, /video\.removeEventListener\('ended',onEnded\)/);
+  assert.doesNotMatch(source, /const listenerVideos = new WeakSet\(\)/);
+});
