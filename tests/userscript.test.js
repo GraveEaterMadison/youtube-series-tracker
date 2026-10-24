@@ -14,6 +14,15 @@ test('userscript metadata targets YouTube and requests no privileged grants', ()
   assert.match(source, /^\/\/ ==\/UserScript==/m);
 });
 
+test('version and Greasy Fork listing metadata are complete and consistent', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  const version = source.match(/^\/\/ @version\\s+(.+)$/m)?.[1]?.trim();
+  assert.equal(version, pkg.version);
+  assert.match(source, /^\/\/ @license\\s+MIT$/m);
+  assert.match(source, /^\/\/ @homepageURL\\s+https:\/\/github\\.com\/GraveEaterMadison\/youtube-series-tracker$/m);
+  assert.match(source, /^\/\/ @supportURL\\s+https:\/\/github\\.com\/GraveEaterMadison\/youtube-series-tracker\/issues$/m);
+});
+
 test('core series-tracking concepts remain present', () => {
   for (const concept of ['localStorage', 'playlist', 'watched', 'export', 'import']) {
     assert.ok(source.toLowerCase().includes(concept.toLowerCase()), 'Expected source to contain ' + concept);
