@@ -5,6 +5,7 @@
 - Add a Series Tracker button to the YouTube desktop player's top controls as well as the existing sidebar/floating entry.
 - Retry player-button insertion as YouTube replaces player controls during single-page navigation.
 - Correct the injected player-button CSS and add regression checks.
+- Ensure the sidebar button relocates into YouTube navigation if that UI loads after the userscript.
 - Add Greasy Fork metadata and publish/update documentation.
 
 ## 2.0.1
