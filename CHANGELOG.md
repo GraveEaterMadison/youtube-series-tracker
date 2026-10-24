@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.2
+
+- Fix auto-next so it stops instead of repeating a watched episode when no unwatched episode remains later in the series.
+- Batch playback, playlist-refresh, history-scan, and mark-all updates to reduce repeated synchronous localStorage serialization.
+- Add executable regression tests for auto-next ordering and batched writes.
+
 ## 2.2.1
 
 - Use a unique default name when a new manual series is created with a blank name, starting with “New Series”.
