@@ -10,6 +10,7 @@ A local-first Firefox userscript for tracking YouTube playlists as series: episo
 
 ## Features
 
+- Open the tracker from a player-top button or the YouTube sidebar/floating entry point.
 - Create a local series library from YouTube playlists.
 - Track playback positions and watched episodes.
 - Configure the auto-mark-watched threshold.
