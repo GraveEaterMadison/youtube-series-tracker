@@ -51,11 +51,11 @@ test('one-by-one series builder actions are wired and versioned', () => {
 });
 
 test('blank series names receive a unique default name', () => {
-  assert.match(source, /function defaultManualSeriesName\(\)/);
-  assert.match(source, /String\(title \|\| ''\)\.trim\(\) \|\| defaultManualSeriesName\(\)/);
+  assert.match(source, /function defaultManualSeriesName\\(\\)/);
+  assert.match(source, /String\\(title \\|\\| ''\\)\\.trim\\(\\) \\|\\| defaultManualSeriesName\\(\\)/);
   assert.match(source, /placeholder="Optional — defaults to New Series"/);
   assert.doesNotMatch(source, /Enter a name for the new series/);
-  assert.match(source, /while \(names\.has\('\?'\)\) suffix\+\+/);
+  assert.ok(source.includes("while (names.has(('New Series ' + suffix).toLocaleLowerCase())) suffix++;"));
 });
 
 test('player button prioritizes adding the current video and keeps a playlist-sync option', () => {
