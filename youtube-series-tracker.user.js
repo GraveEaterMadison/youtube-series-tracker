@@ -527,7 +527,11 @@
       #${BTN}{display:flex;align-items:center;gap:20px;width:100%;padding:10px 12px;border:0;border-radius:10px;background:transparent;color:var(--yt-spec-text-primary,#f1f1f1);font:500 14px Roboto,Arial,sans-serif;cursor:pointer}
       #${BTN}:hover{background:var(--yt-spec-10-percent-layer,#272727)}#${BTN} svg{width:24px;height:24px;fill:currentColor;flex:none}
       #${BTN}.floating{position:fixed;z-index:999990;left:12px;bottom:18px;width:auto;background:#ff1744;color:white;border-radius:22px;padding:10px 15px;box-shadow:0 5px 20px #0007}
-      #${PLAYER_BTN}{display:inline-flex!important;align-items:center;justify-content:center;width:48px;height:48px;padding:0;margin:0;border:0;background:transparent;color:#f1f1f1;cursor:pointer;flex:0 0 48px;vertical-align:top}\n      #${PLAYER_BTN} svg{display:block;width:24px;height:24px;fill:currentColor}\n      #${PLAYER_BTN}:hover{opacity:.82}\n      #${PLAYER_BTN}:focus-visible{outline:2px solid #fff;outline-offset:-4px;border-radius:8px}\n      #yst2-toast{position:fixed;z-index:1000001;left:50%;bottom:26px;transform:translate(-50%,15px);opacity:0;pointer-events:none;background:#292a31;color:white;padding:12px 16px;border-radius:10px;box-shadow:0 5px 25px #0008;transition:.2s;font:13px Roboto,Arial,sans-serif;max-width:90vw}
+      #${PLAYER_BTN}{display:inline-flex!important;align-items:center;justify-content:center;width:48px;height:48px;padding:0;margin:0;border:0;background:transparent;color:#f1f1f1;cursor:pointer;flex:0 0 48px;vertical-align:top}
+      #${PLAYER_BTN} svg{display:block;width:24px;height:24px;fill:currentColor}
+      #${PLAYER_BTN}:hover{opacity:.82}
+      #${PLAYER_BTN}:focus-visible{outline:2px solid #fff;outline-offset:-4px;border-radius:8px}
+      #yst2-toast{position:fixed;z-index:1000001;left:50%;bottom:26px;transform:translate(-50%,15px);opacity:0;pointer-events:none;background:#292a31;color:white;padding:12px 16px;border-radius:10px;box-shadow:0 5px 25px #0008;transition:.2s;font:13px Roboto,Arial,sans-serif;max-width:90vw}
       #yst2-toast.show{opacity:1;transform:translate(-50%,0)}@media(max-width:600px){#${PANEL}{top:6px;right:6px;bottom:6px;width:calc(100vw - 12px)}.yst2-thumb{width:72px}}
     `;document.head.appendChild(st);
   }
