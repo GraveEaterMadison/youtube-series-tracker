@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         YouTube Series Tracker
-// @namespace    https://local-series-tracker.invalid/
+// @namespace    https://github.com/GraveEaterMadison/youtube-series-tracker
 // @version      2.0.1
 // @description  Track YouTube playlists as series with local episode progress, watched status, continue watching, history matching, and optional auto-next.
 // @author       Zero
