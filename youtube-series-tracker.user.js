@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         YouTube Series — Morphe-inspired
+// @name         YouTube Series Tracker
 // @namespace    https://local-series-tracker.invalid/
 // @version      2.0.1
 // @description  Track YouTube playlists as series with local episode progress, watched status, continue watching, history matching, and optional auto-next.
