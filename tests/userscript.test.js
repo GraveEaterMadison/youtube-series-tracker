@@ -2,9 +2,25 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const root = path.join(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'youtube-series-tracker.user.js'), 'utf8');
+
+function extractSimpleFunction(source, name) {
+  const start = source.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `Could not find function ${name}`);
+  const open = source.indexOf('{', start);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') {
+      depth--;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  throw new Error(`Unclosed function ${name}`);
+}
 
 test('userscript metadata targets YouTube and requests no privileged grants', () => {
   assert.match(source, /^\/\/ ==UserScript==/);
@@ -41,7 +57,7 @@ test('sidebar button relocates when YouTube navigation loads after the userscrip
 });
 
 test('one-by-one series builder actions are wired and versioned', () => {
-  assert.match(source, /^\/\/ @version\s+2\.2\.1$/m);
+  assert.match(source, /^\/\/ @version\s+2\.2\.2$/m);
   assert.match(source, /id="yst2-add-current"/);
   assert.match(source, /function showAddVideoDialog\(\)/);
   assert.match(source, /function saveVideoToSeries\(series, meta\)/);
@@ -90,4 +106,41 @@ test('readme describes beta status and local storage limitations', () => {
   assert.match(readme, /beta/i);
   assert.match(readme, /localStorage/i);
   assert.match(readme, /end-to-end tests/i);
+});
+
+test('auto-next never repeats an already-watched episode when no unwatched episode follows', () => {
+  const watched = new Set(['current', 'later-watched']);
+  const chooseNext = vm.runInNewContext(`(${extractSimpleFunction(source, 'chooseNext')})`, {
+    stateFor: id => ({ watched: watched.has(id) }),
+    chooseContinue: () => ({ id: 'continue-fallback' })
+  });
+  const series = { episodes: [
+    { id: 'current', order: 0 },
+    { id: 'later-watched', order: 1 },
+    { id: 'last-watched', order: 2 }
+  ] };
+  assert.equal(chooseNext(series, 'current'), null);
+});
+
+test('auto-next selects the next unwatched episode in playlist order', () => {
+  const watched = new Set(['current', 'watched-middle']);
+  const chooseNext = vm.runInNewContext(`(${extractSimpleFunction(source, 'chooseNext')})`, {
+    stateFor: id => ({ watched: watched.has(id) }),
+    chooseContinue: () => null
+  });
+  const series = { episodes: [
+    { id: 'current', order: 0 },
+    { id: 'watched-middle', order: 1 },
+    { id: 'next-unwatched', order: 2 }
+  ] };
+  assert.equal(chooseNext(series, 'current').id, 'next-unwatched');
+});
+
+test('playlist refresh and history scan can batch state changes into one write', () => {
+  const setState = extractSimpleFunction(source, 'setState');
+  const mergeSeries = extractSimpleFunction(source, 'mergeSeries');
+  const historyScan = extractSimpleFunction(source, 'scanHistoryPage');
+  assert.match(setState, /persist = true/);
+  assert.match(mergeSeries, /setState\(ep\.id,\s*\{[^}]+\},\s*false\)/);
+  assert.match(historyScan, /setState\(id,\s*\{watched:true\},\s*false\)/);
 });
