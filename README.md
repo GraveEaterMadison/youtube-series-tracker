@@ -12,6 +12,7 @@ A local-first Firefox userscript for tracking YouTube playlists as series: episo
 
 - Open the tracker from a player-top button or the YouTube sidebar/floating entry point.
 - Use **Add current video** to add an episode to an existing series or start a new series with that video.
+- Leave the new-series name blank to automatically use a unique default such as **New Series**, **New Series 2**, and so on.
 - Create a local series library from YouTube playlists or add videos one by one to a manual series.
 - Track playback positions and watched episodes.
 - Configure the auto-mark-watched threshold.
