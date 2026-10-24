@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube Series Tracker
 // @namespace    https://github.com/GraveEaterMadison/youtube-series-tracker
-// @version      2.0.1
-// @description  Track YouTube playlists as series with local episode progress, watched status, continue watching, history matching, and optional auto-next.
+// @version      2.1.0
+// @description  Track YouTube playlists as series from the player button or sidebar, with local episode progress, watched status, history matching, and optional auto-next.
 // @author       Zero
 // @license      MIT
 // @homepageURL  https://github.com/GraveEaterMadison/youtube-series-tracker
@@ -21,6 +21,7 @@
   const PANEL = 'yst2-panel';
   const STYLE = 'yst2-style';
   const BTN = 'yst2-button';
+  const PLAYER_BTN = 'yst2-player-button';
   const AUTO_WATCHED_DEFAULT = 0.90;
   const SAVE_MS = 2000;
   const AUTO_SYNC_KEY = 'yst2-last-sync';
@@ -435,10 +436,65 @@
     if(host){const wrap=document.createElement('div');wrap.id='yst2-sidebar-wrap';wrap.appendChild(button);host.appendChild(wrap);}
     else {button.classList.add('floating');document.body.appendChild(button);}
   }
+  function addPlayerButton() {
+    const player = document.querySelector('#movie_player');
+    if (!player) return;
+    const host = player.querySelector('.ytp-chrome-top-buttons')
+      || player.querySelector('.ytp-right-controls');
+    if (!host) return;
+
+    let button = document.getElementById(PLAYER_BTN);
+    if (button && button.parentElement === host) return;
+    if (button) button.remove();
+
+    button = document.createElement('button');
+    button.type = 'button';
+    button.id = PLAYER_BTN;
+    button.className = 'ytp-button yst2-player-button';
+    button.title = 'YouTube Series Tracker';
+    button.setAttribute('aria-label', 'Open YouTube Series Tracker');
+    button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 3.5A2.5 2.5 0 0 1 6.5 1h11A2.5 2.5 0 0 1 20 3.5v17a.5.5 0 0 1-.8.4L12 15.5l-7.2 5.4a.5.5 0 0 1-.8-.4v-17ZM7 5v2h10V5H7Zm0 4v2h7V9H7Z"/></svg>';
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      openFromPlayer();
+    });
+    host.appendChild(button);
+  }
+
+  function openFromPlayer() {
+    const videoId = getVideoId();
+    const listId = getPlaylistId();
+    activeTab = 'library';
+    openPanel();
+
+    if (listId) {
+      const existing = findSeries(listId);
+      if (existing) {
+        toast('Series "' + existing.title + '" is already in your library.');
+        return;
+      }
+      // Like Morphe's player action, the button offers a one-tap way to follow
+      // the playlist currently playing instead of requiring a trip to its page.
+      syncCurrentPlaylist();
+      return;
+    }
+
+    const existing = videoId
+      ? db.series.find(series => series.episodes.some(episode => episode.id === videoId))
+      : null;
+    if (existing) {
+      toast('This episode belongs to "' + existing.title + '".');
+      return;
+    }
+    toast('To add a series, open a playlist or play a video whose URL contains list=.');
+  }
+
   function ensureUI() {
     addStyles();
     if(!document.getElementById(PANEL)){const p=document.createElement('aside');p.id=PANEL;document.body.appendChild(p);}
     addSidebarButton();
+    addPlayerButton();
   }
   function openPanel(){document.getElementById(PANEL)?.classList.add('open');renderPanel();}
   function closePanel(){document.getElementById(PANEL)?.classList.remove('open');}
@@ -471,7 +527,7 @@
       #${BTN}{display:flex;align-items:center;gap:20px;width:100%;padding:10px 12px;border:0;border-radius:10px;background:transparent;color:var(--yt-spec-text-primary,#f1f1f1);font:500 14px Roboto,Arial,sans-serif;cursor:pointer}
       #${BTN}:hover{background:var(--yt-spec-10-percent-layer,#272727)}#${BTN} svg{width:24px;height:24px;fill:currentColor;flex:none}
       #${BTN}.floating{position:fixed;z-index:999990;left:12px;bottom:18px;width:auto;background:#ff1744;color:white;border-radius:22px;padding:10px 15px;box-shadow:0 5px 20px #0007}
-      #yst2-toast{position:fixed;z-index:1000001;left:50%;bottom:26px;transform:translate(-50%,15px);opacity:0;pointer-events:none;background:#292a31;color:white;padding:12px 16px;border-radius:10px;box-shadow:0 5px 25px #0008;transition:.2s;font:13px Roboto,Arial,sans-serif;max-width:90vw}
+      #${PLAYER_BTN}{display:inline-flex!important;align-items:center;justify-content:center;width:48px;height:48px;padding:0;margin:0;border:0;background:transparent;color:#f1f1f1;cursor:pointer;flex:0 0 48px;vertical-align:top}\n      #${PLAYER_BTN} svg{display:block;width:24px;height:24px;fill:currentColor}\n      #${PLAYER_BTN}:hover{opacity:.82}\n      #${PLAYER_BTN}:focus-visible{outline:2px solid #fff;outline-offset:-4px;border-radius:8px}\n      #yst2-toast{position:fixed;z-index:1000001;left:50%;bottom:26px;transform:translate(-50%,15px);opacity:0;pointer-events:none;background:#292a31;color:white;padding:12px 16px;border-radius:10px;box-shadow:0 5px 25px #0008;transition:.2s;font:13px Roboto,Arial,sans-serif;max-width:90vw}
       #yst2-toast.show{opacity:1;transform:translate(-50%,0)}@media(max-width:600px){#${PANEL}{top:6px;right:6px;bottom:6px;width:calc(100vw - 12px)}.yst2-thumb{width:72px}}
     `;document.head.appendChild(st);
   }
@@ -525,7 +581,10 @@
     },450);
   }
   function observeSidebar() {
-    const mo=new MutationObserver(()=>{if(!document.getElementById(BTN))addSidebarButton();});
+    const mo=new MutationObserver(()=>{
+      if(!document.getElementById(BTN)) addSidebarButton();
+      addPlayerButton();
+    });
     mo.observe(document.documentElement,{childList:true,subtree:true});
   }
   function boot() {
@@ -537,7 +596,8 @@
     if(tickTimer)clearInterval(tickTimer);
     tickTimer=setInterval(()=>{
       if(getVideoId() && (getVideoId()!==currentVideoId || document.querySelector('video')!==activeVideo))trackCurrentVideo();
-      if(!document.getElementById(BTN))addSidebarButton();
+      if(!document.getElementById(BTN)) addSidebarButton();
+      addPlayerButton();
     },1500);
   }
   boot();
