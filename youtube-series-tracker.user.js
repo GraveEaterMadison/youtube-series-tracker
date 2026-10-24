@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Series Tracker
 // @namespace    https://github.com/GraveEaterMadison/youtube-series-tracker
-// @version      2.2.1
+// @version      2.2.2
 // @description  Build YouTube series from playlists or add individual videos, with automatic default series names, local progress, watched status, history matching, and optional auto-next.
 // @author       Zero
 // @license      MIT
@@ -125,12 +125,12 @@
   function stateFor(id) {
     return db.episodes[id] || { watched: false, position: 0, duration: 0, title: '', updatedAt: 0, lastWatchedAt: 0 };
   }
-  function setState(id, patch) {
+  function setState(id, patch, persist = true) {
     const old = stateFor(id);
     const next = { ...old, ...patch, updatedAt: Date.now() };
     if (patch.watched === true && !old.watched) next.lastWatchedAt = Date.now();
     db.episodes[id] = next;
-    saveDB();
+    if (persist) saveDB();
   }
   function getInitialData() {
     return window.ytInitialData || window.ytInitialPlayerResponse?.responseContext?.serviceTrackingParams && window.ytInitialData || null;
@@ -255,7 +255,7 @@
       const next = { ...prev, ...ep, order: i };
       merged.push(next);
       const st = stateFor(ep.id);
-      setState(ep.id, { title: ep.title || st.title, duration: ep.duration || st.duration });
+      setState(ep.id, { title: ep.title || st.title, duration: ep.duration || st.duration }, false);
     });
     // Keep previously-known items that may be unavailable/removed, at the end.
     for (const [id, ep] of old) if (!merged.some(x => x.id === id)) merged.push({ ...ep, order: merged.length, unavailable: ep.manuallyAdded ? false : true });
@@ -308,7 +308,7 @@
   function chooseNext(s, id) {
     const eps = [...(s.episodes || [])].sort((a,b) => a.order-b.order);
     const idx = eps.findIndex(e => e.id === id);
-    if (idx >= 0) return eps.slice(idx+1).find(e => !stateFor(e.id).watched) || eps.slice(idx+1)[0] || null;
+    if (idx >= 0) return eps.slice(idx+1).find(e => !stateFor(e.id).watched) || null;
     return chooseContinue(s);
   }
   function openEpisode(s, e, resume = true) {
@@ -520,7 +520,7 @@
     p.querySelector('#yst2-historyscan')?.addEventListener('change',e=>{db.settings.historyScan=e.target.checked;saveDB();});
     p.querySelector('#yst2-clear')?.addEventListener('click',()=>{if(confirm('Permanently delete all series, episode progress, and history matches? Export a backup first if needed.')){db=emptyDB();saveDB();renderPanel();toast('Tracker data deleted.');}});
     p.querySelector('#yst2-recount')?.addEventListener('click',()=>{for(const [id,st] of Object.entries(db.episodes)){if(!st.watched&&st.duration>0&&st.position/st.duration>=db.settings.watchedThreshold)setState(id,{watched:true});}renderPanel();toast('Watched status recalculated.');});
-    p.querySelector('#yst2-markall')?.addEventListener('click',()=>{const s=findSeries(getPlaylistId());if(!s){toast('Open a tracked series playlist first.');return;}if(confirm(`Mark all ${s.episodes.length} episodes watched?`)){for(const e of s.episodes)markEpisode(e.id,true);renderPanel();}});
+    p.querySelector('#yst2-markall')?.addEventListener('click',()=>{const s=findSeries(getPlaylistId());if(!s){toast('Open a tracked series playlist first.');return;}if(confirm(`Mark all ${s.episodes.length} episodes watched?`)){const now=Date.now();for(const e of s.episodes){const old=stateFor(e.id);db.episodes[e.id]={...old,watched:true,position:old.duration||e.duration||old.position,duration:old.duration||e.duration||0,updatedAt:now,lastWatchedAt:old.watched?old.lastWatchedAt:now};}saveDB();renderPanel();toast('All episodes marked watched.');}});
     p.querySelector('#yst2-scanhistory')?.addEventListener('click',scanHistoryPage);
   }
   function exportBackup() {
@@ -542,7 +542,7 @@
         const id=new URL(a.href,location.origin).searchParams.get('v');if(!id||!matched.has(id))continue;
         const title=text(node.querySelector('#video-title'))||a.title||stateFor(id).title;
         db.history[id]={title,lastSeen:Date.now()};count++;
-        const st=stateFor(id);if(!st.watched)setState(id,{watched:true});
+        const st=stateFor(id);if(!st.watched)setState(id,{watched:true},false);
       }catch(_){}
     }
     saveDB();renderPanel();toast(`History scan found ${count} tracked episode(s). Scroll down to load more history, then scan again.`);
@@ -700,8 +700,9 @@
       const dur=Number.isFinite(video.duration)?video.duration:meta.duration;
       const old=stateFor(meta.id), threshold=Number(db.settings.watchedThreshold);
       const watched=old.watched || (dur>0 && (video.ended || (threshold<1 && video.currentTime/dur>=threshold)));
-      setState(meta.id,{title:meta.title||old.title,position:watched?(dur||video.currentTime):video.currentTime,duration:dur||old.duration,watched});
-      if(s){db.history[meta.id]={title:meta.title,lastSeen:Date.now()};saveDB();}
+      setState(meta.id,{title:meta.title||old.title,position:watched?(dur||video.currentTime):video.currentTime,duration:dur||old.duration,watched},false);
+      if(s) db.history[meta.id]={title:meta.title,lastSeen:Date.now()};
+      saveDB();
       if(document.getElementById(PANEL)?.classList.contains('open')&&Date.now()-lastSave>1500){lastSave=Date.now();renderPanel();}
     };
     const onTime=()=>{if(Date.now()-lastSave>=SAVE_MS){lastSave=Date.now();savePosition();}};
@@ -709,8 +710,9 @@
     video.addEventListener('loadedmetadata',savePosition,{once:true});
     video.addEventListener('pause',savePosition);
     video.addEventListener('ended',()=>{
-      setState(meta.id,{title:meta.title,position:video.duration||meta.duration,duration:video.duration||meta.duration,watched:true});
-      if(s){db.history[meta.id]={title:meta.title,lastSeen:Date.now()};saveDB();}
+      setState(meta.id,{title:meta.title,position:video.duration||meta.duration,duration:video.duration||meta.duration,watched:true},false);
+      if(s) db.history[meta.id]={title:meta.title,lastSeen:Date.now()};
+      saveDB();
       if(db.settings.autoNext && s) {
         const next=chooseNext(s,meta.id);
         if(next && next.id!==meta.id) {
