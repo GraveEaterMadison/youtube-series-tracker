@@ -1,0 +1,12 @@
+{
+  "name": "youtube-series-tracker",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Local-first userscript for tracking episodic YouTube playlists as series",
+  "license": "MIT",
+  "scripts": {
+    "check": "node --check youtube-series-tracker.user.js",
+    "test": "node --test"
+  },
+  "engines": { "node": ">=20" }
+}
