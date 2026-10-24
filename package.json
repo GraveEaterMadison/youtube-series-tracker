@@ -1,6 +1,6 @@
 {
   "name": "youtube-series-tracker",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "private": false,
   "description": "Local-first YouTube series tracker with playlist sync and manual one-by-one video additions",
   "license": "MIT",
