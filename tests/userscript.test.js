@@ -51,9 +51,9 @@ test('one-by-one series builder actions are wired and versioned', () => {
 });
 
 test('blank series names receive a unique default name', () => {
-  assert.match(source, /function defaultManualSeriesName\\(\\)/);
-  assert.match(source, /String\\(title \\|\\| ''\\)\\.trim\\(\\) \\|\\| defaultManualSeriesName\\(\\)/);
-  assert.match(source, /placeholder="Optional — defaults to New Series"/);
+  assert.ok(source.includes('function defaultManualSeriesName()'));
+  assert.ok(source.includes("String(title || '').trim() || defaultManualSeriesName()"));
+  assert.ok(source.includes('placeholder="Optional — defaults to New Series"'));
   assert.doesNotMatch(source, /Enter a name for the new series/);
   assert.ok(source.includes("while (names.has(('New Series ' + suffix).toLocaleLowerCase())) suffix++;"));
 });
