@@ -428,13 +428,32 @@
     saveDB();renderPanel();toast(`History scan found ${count} tracked episode(s). Scroll down to load more history, then scan again.`);
   }
   function addSidebarButton() {
-    if(document.getElementById(BTN))return;
-    const button=document.createElement('button');button.id=BTN;
-    button.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h16a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm2 3v12h12V6H6zm2 2h8v2H8V8zm0 4h8v2H8v-2z"/></svg><span>Series</span>';
-    button.addEventListener('click',togglePanel);
-    const host=document.querySelector('ytd-guide-section-renderer #items')||document.querySelector('ytd-guide-renderer #sections')||document.querySelector('ytd-mini-guide-renderer');
-    if(host){const wrap=document.createElement('div');wrap.id='yst2-sidebar-wrap';wrap.appendChild(button);host.appendChild(wrap);}
-    else {button.classList.add('floating');document.body.appendChild(button);}
+    let button = document.getElementById(BTN);
+    if (!button) {
+      button = document.createElement('button');
+      button.id = BTN;
+      button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h16a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm2 3v12h12V6H6zm2 2h8v2H8V8zm0 4h8v2H8v-2z"/></svg><span>Series</span>';
+      button.addEventListener('click', togglePanel);
+    }
+
+    const host = document.querySelector('ytd-guide-section-renderer #items')
+      || document.querySelector('ytd-guide-renderer #sections')
+      || document.querySelector('ytd-mini-guide-renderer');
+    let wrap = document.getElementById('yst2-sidebar-wrap');
+
+    if (host) {
+      if (!wrap) {
+        wrap = document.createElement('div');
+        wrap.id = 'yst2-sidebar-wrap';
+      }
+      if (button.parentElement !== wrap) wrap.appendChild(button);
+      if (wrap.parentElement !== host) host.appendChild(wrap);
+      button.classList.remove('floating');
+    } else {
+      if (wrap) wrap.remove();
+      if (button.parentElement !== document.body) document.body.appendChild(button);
+      button.classList.add('floating');
+    }
   }
   function addPlayerButton() {
     const player = document.querySelector('#movie_player');
