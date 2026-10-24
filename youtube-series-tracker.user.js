@@ -688,7 +688,11 @@
   }
   function trackCurrentVideo() {
     const meta=videoMeta(), video=document.querySelector('video');
-    if(!meta||!video)return;
+    if(!meta||!video){
+      if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;}
+      currentVideoId='';activeVideo=null;
+      return;
+    }
     if(currentVideoId===meta.id&&activeVideo===video)return;
     // YouTube may reuse the same <video> element while changing the active watch route.
     // Detach the previous episode's closures before attaching handlers for the new episode.
