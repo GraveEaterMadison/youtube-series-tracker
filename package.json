@@ -2,7 +2,7 @@
   "name": "youtube-series-tracker",
   "version": "2.2.0",
   "private": false,
-  "description": "Local-first userscript for tracking episodic YouTube playlists as series",
+  "description": "Local-first YouTube series tracker with playlist sync and manual one-by-one video additions",
   "license": "MIT",
   "scripts": {
     "check": "node --check youtube-series-tracker.user.js",
