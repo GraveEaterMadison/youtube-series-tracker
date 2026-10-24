@@ -109,7 +109,7 @@ test('readme describes beta status and local storage limitations', () => {
 });
 
 test('auto-next never repeats an already-watched episode when no unwatched episode follows', () => {
-  const watched = new Set(['current', 'later-watched']);
+  const watched = new Set(['current', 'later-watched', 'last-watched']);
   const chooseNext = vm.runInNewContext(`(${extractSimpleFunction(source, 'chooseNext')})`, {
     stateFor: id => ({ watched: watched.has(id) }),
     chooseContinue: () => ({ id: 'continue-fallback' })
