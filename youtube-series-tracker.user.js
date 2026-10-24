@@ -415,6 +415,7 @@
         '<label class="yst2-dialog-label" for="yst2-new-series-title">New series name</label>' +
         '<input id="yst2-new-series-title" class="yst2-dialog-input" type="text" maxlength="160" placeholder="e.g. My physics lectures">' +
         '<button type="button" id="yst2-create-series" class="yst2-mainbtn">Create series with this video</button>' +
+        (getPlaylistId() ? '<button type="button" id="yst2-dialog-sync-playlist" class="yst2-subbtn">Sync the entire current playlist instead</button>' : '') +
         '<button type="button" id="yst2-dialog-cancel" class="yst2-subbtn yst2-dialog-cancel">Cancel</button>' +
       '</section>';
     panel.appendChild(modal);
@@ -434,6 +435,11 @@
         return;
       }
       createManualSeries(titleInput.value, meta);
+    });
+    modal.querySelector('#yst2-dialog-sync-playlist')?.addEventListener('click', () => {
+      modal.remove();
+      activeTab = 'library';
+      syncCurrentPlaylist();
     });
     const close = () => modal.remove();
     modal.querySelector('#yst2-dialog-close').addEventListener('click', close);
@@ -602,23 +608,23 @@
     activeTab = 'library';
     openPanel();
 
+    // A playing video should offer the one-by-one builder first, even when its
+    // URL also contains list=. The dialog retains a separate whole-playlist action.
+    if (videoId) {
+      showAddVideoDialog();
+      return;
+    }
+
     if (listId) {
       const existing = findSeries(listId);
       if (existing) {
         toast('Series "' + existing.title + '" is already in your library.');
         return;
       }
-      // Like Morphe's player action, the button offers a one-tap way to follow
-      // the playlist currently playing instead of requiring a trip to its page.
       syncCurrentPlaylist();
       return;
     }
-
-    if (videoId) {
-      showAddVideoDialog();
-      return;
-    }
-    toast('Open a YouTube video to add it to a series.');
+    toast('Open a YouTube video or playlist first.');
   }
 
   function ensureUI() {
