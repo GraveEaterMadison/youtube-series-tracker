@@ -33,6 +33,13 @@ test('Morphe-inspired player entry point is present and styled with real CSS new
   assert.doesNotMatch(source, /vertical-align:top\}\\n/);
 });
 
+test('sidebar button relocates when YouTube navigation loads after the userscript', () => {
+  assert.match(source, /function addSidebarButton\(\)/);
+  assert.match(source, /const host = document\.querySelector\('ytd-guide-section-renderer #items'\)/);
+  assert.match(source, /if \(button\.parentElement !== wrap\) wrap\.appendChild\(button\)/);
+  assert.match(source, /button\.classList\.remove\('floating'\)/);
+});
+
 test('core series-tracking concepts remain present', () => {
   for (const concept of ['localStorage', 'playlist', 'watched', 'export', 'import']) {
     assert.ok(source.toLowerCase().includes(concept.toLowerCase()), 'Expected source to contain ' + concept);
