@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube Series Tracker
 // @namespace    https://github.com/GraveEaterMadison/youtube-series-tracker
-// @version      2.2.0
-// @description  Build YouTube series from playlists or add individual videos, with local progress, watched status, history matching, and optional auto-next.
+// @version      2.2.1
+// @description  Build YouTube series from playlists or add individual videos, with automatic default series names, local progress, watched status, history matching, and optional auto-next.
 // @author       Zero
 // @license      MIT
 // @homepageURL  https://github.com/GraveEaterMadison/youtube-series-tracker
@@ -350,12 +350,16 @@
     return true;
   }
 
+  function defaultManualSeriesName() {
+    const names = new Set(db.series.map(series => String(series.title || '').trim().toLocaleLowerCase()));
+    if (!names.has('new series')) return 'New Series';
+    let suffix = 2;
+    while (names.has(('New Series ' + suffix).toLocaleLowerCase())) suffix++;
+    return 'New Series ' + suffix;
+  }
+
   function createManualSeries(title, meta) {
-    const cleanTitle = String(title || '').trim();
-    if (!cleanTitle) {
-      toast('Enter a name for the new series.');
-      return false;
-    }
+    const cleanTitle = String(title || '').trim() || defaultManualSeriesName();
     if (!meta) {
       toast('Open a YouTube video before creating a series.');
       return false;
@@ -413,7 +417,7 @@
         '<button type="button" id="yst2-add-existing" class="yst2-mainbtn" disabled>Add video to selected series</button>' +
         '<div class="yst2-modal-or"><span>or create a new series</span></div>' +
         '<label class="yst2-dialog-label" for="yst2-new-series-title">New series name</label>' +
-        '<input id="yst2-new-series-title" class="yst2-dialog-input" type="text" maxlength="160" placeholder="e.g. My physics lectures">' +
+        '<input id="yst2-new-series-title" class="yst2-dialog-input" type="text" maxlength="160" placeholder="Optional — defaults to New Series">' +
         '<button type="button" id="yst2-create-series" class="yst2-mainbtn">Create series with this video</button>' +
         (getPlaylistId() ? '<button type="button" id="yst2-dialog-sync-playlist" class="yst2-subbtn">Sync the entire current playlist instead</button>' : '') +
         '<button type="button" id="yst2-dialog-cancel" class="yst2-subbtn yst2-dialog-cancel">Cancel</button>' +
@@ -429,11 +433,6 @@
       saveVideoToSeries(series, meta);
     });
     modal.querySelector('#yst2-create-series').addEventListener('click', () => {
-      if (!titleInput.value.trim()) {
-        titleInput.focus();
-        toast('Enter a name for the new series.');
-        return;
-      }
       createManualSeries(titleInput.value, meta);
     });
     modal.querySelector('#yst2-dialog-sync-playlist')?.addEventListener('click', () => {
