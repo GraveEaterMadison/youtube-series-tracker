@@ -34,7 +34,7 @@
   let lastSave = 0;
   let syncBusy = false;
   let currentHistoryScan = '';
-  const listenerVideos = new WeakSet();
+  let activeVideoCleanup = null;
 
   function emptyDB() {
     return {
@@ -690,6 +690,9 @@
     const meta=videoMeta(), video=document.querySelector('video');
     if(!meta||!video)return;
     if(currentVideoId===meta.id&&activeVideo===video)return;
+    // YouTube may reuse the same <video> element while changing the active watch route.
+    // Detach the previous episode's closures before attaching handlers for the new episode.
+    if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;}
     currentVideoId=meta.id;activeVideo=video;
     const list=getPlaylistId(), s=list?findSeries(list):db.series.find(x=>x.episodes.some(e=>e.id===meta.id));
     if(s&&!s.episodes.some(e=>e.id===meta.id)){
@@ -709,7 +712,7 @@
     video.addEventListener('timeupdate',onTime);
     video.addEventListener('loadedmetadata',savePosition,{once:true});
     video.addEventListener('pause',savePosition);
-    video.addEventListener('ended',()=>{
+    const onEnded=()=>{
       setState(meta.id,{title:meta.title,position:video.duration||meta.duration,duration:video.duration||meta.duration,watched:true},false);
       if(s) db.history[meta.id]={title:meta.title,lastSeen:Date.now()};
       saveDB();
@@ -721,7 +724,14 @@
         }
       }
       if(document.getElementById(PANEL)?.classList.contains('open'))renderPanel();
-    });
+    };
+    video.addEventListener('ended',onEnded);
+    activeVideoCleanup=()=>{
+      video.removeEventListener('timeupdate',onTime);
+      video.removeEventListener('loadedmetadata',savePosition);
+      video.removeEventListener('pause',savePosition);
+      video.removeEventListener('ended',onEnded);
+    };
     if(s){db.history[meta.id]={title:meta.title,lastSeen:Date.now()};saveDB();}
   }
   function routeChanged() {
