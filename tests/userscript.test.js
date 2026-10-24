@@ -3,19 +3,20 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const sourcePath = path.join(__dirname, '..', 'youtube-series-tracker.user.js');
-const source = fs.readFileSync(sourcePath, 'utf8');
+const root = path.join(__dirname, '..');
+const source = fs.readFileSync(path.join(root, 'youtube-series-tracker.user.js'), 'utf8');
 
 test('userscript metadata targets YouTube and requests no privileged grants', () => {
   assert.match(source, /^\/\/ ==UserScript==/);
-  assert.match(source, /^\/\/ @name\s+.+$/m);
+  assert.match(source, /^\/\/ @name\s+YouTube Series Tracker$/m);
+  assert.match(source, /^\/\/ @namespace\s+https:\/\/github\.com\/GraveEaterMadison\/youtube-series-tracker$/m);
   assert.match(source, /^\/\/ @match\s+https:\/\/www\.youtube\.com\/\*$/m);
   assert.match(source, /^\/\/ @grant\s+none$/m);
   assert.match(source, /^\/\/ ==\/UserScript==/m);
 });
 
 test('version and Greasy Fork listing metadata are complete and consistent', () => {
-  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   const version = source.match(/^\/\/ @version\s+(.+)$/m)?.[1]?.trim();
   assert.equal(version, pkg.version);
   assert.match(source, /^\/\/ @license\s+MIT$/m);
@@ -39,7 +40,7 @@ test('userscript has no remote-script loader directives', () => {
 });
 
 test('readme describes beta status and local storage limitations', () => {
-  const readme = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
+  const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
   assert.match(readme, /beta/i);
   assert.match(readme, /localStorage/i);
   assert.match(readme, /end-to-end tests/i);
