@@ -328,7 +328,8 @@ test('resume planner starts from the selected cursor before falling back to the 
 });
 
 test('YouTube channel playlist-tab lookup verifies channel identity before enumerating its playlists', () => {
-  const getEndpoint = vm.runInNewContext('(' + extractSimpleFunction(source, 'channelPlaylistEndpoint') + ')');
+  const channelBrowseTabs = vm.runInNewContext('(' + extractSimpleFunction(source, 'channelBrowseTabs') + ')');
+  const getEndpoint = vm.runInNewContext('(' + extractSimpleFunction(source, 'channelPlaylistEndpoint') + ')', {channelBrowseTabs});
   const channel = 'UCabcdefghijklmnopqrstuv';
   const valid = {
     metadata: {channelMetadataRenderer:{externalId:channel}},
@@ -366,6 +367,7 @@ test('playlist discovery also parses YouTube lockup playlist cards', () => {
 
 test('current playlist indexes are normalized from YouTube one-based index URLs', () => {
   const currentPlaylistIndex = vm.runInNewContext('(' + extractSimpleFunction(source, 'currentPlaylistIndex') + ')', {
+    URL,
     location:{origin:'https://www.youtube.com'}
   });
   assert.equal(currentPlaylistIndex('https://www.youtube.com/watch?v=aaaaaaaaaaa&list=PLabcdefghijk&index=4'), 3);
