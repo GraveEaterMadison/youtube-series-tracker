@@ -34,6 +34,8 @@
   let routeTimer = null;
   let lastSave = 0;
   let syncBusy = false;
+  let playerActionBusy = false;
+  const discoveryCache = new Map();
   let currentHistoryScan = '';
   let activeVideoCleanup = null;
 
@@ -153,91 +155,272 @@
     if (Array.isArray(obj)) { for (const x of obj) walk(x, fn); return; }
     for (const k of Object.keys(obj)) walk(obj[k], fn);
   }
-  function videoFromRenderer(r) {
-    const v = r?.playlistVideoRenderer || r?.playlistPanelVideoRenderer;
-    if (!v?.videoId) return null;
-    const title = v.title?.runs?.map(x => x.text).join('') || v.title?.simpleText || 'Untitled episode';
-    const length = v.lengthSeconds ? Number(v.lengthSeconds) : parseDuration(v.lengthText?.simpleText);
-    const thumb = v.thumbnail?.thumbnails?.slice(-1)[0]?.url || `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`;
-    return { id: v.videoId, title, duration: length || 0, thumb, url: `https://www.youtube.com/watch?v=${v.videoId}` };
+  function rendererText(node) {
+    if (node == null) return '';
+    if (typeof node === 'string') return node;
+    if (typeof node.simpleText === 'string') return node.simpleText;
+    if (Array.isArray(node.runs)) return node.runs.map(run => String(run && run.text || '')).join('');
+    return '';
   }
-  function findPlaylistRenderer(data) {
-    const out = [];
-    walk(data, o => {
-      const ep = videoFromRenderer(o);
-      if (ep && !out.some(x => x.id === ep.id)) out.push(ep);
+
+  function isSuggestiblePlaylistId(id) {
+    const value = String(id || '').trim();
+    return /^[A-Za-z0-9_-]{2,200}$/.test(value) && !/^(?:RD|UL)/.test(value) && value !== 'WL' && value !== 'LL';
+  }
+
+  function isDiscoveryPlaylistId(id) {
+    return isSuggestiblePlaylistId(id) && !/^(?:UU|UUL)/.test(id);
+  }
+
+  function playlistRowEpisode(row, listId, ordinal) {
+    const v = row && (row.playlistVideoRenderer || row.playlistPanelVideoRenderer);
+    if (!v) return null;
+    const rawId = String(v.videoId || '');
+    const validId = /^[A-Za-z0-9_-]{11}$/.test(rawId);
+    const title = rendererText(v.title) || (validId ? 'Untitled episode' : 'Unavailable video');
+    const overlays = Array.isArray(v.thumbnailOverlays) ? v.thumbnailOverlays : [];
+    const upcoming = Boolean(v.upcomingEventData) || overlays.some(item => item && item.thumbnailOverlayTimeStatusRenderer && item.thumbnailOverlayTimeStatusRenderer.style === 'UPCOMING');
+    const unavailableTitle = title === '[Private video]' || title === '[Deleted video]';
+    const available = validId && v.isPlayable !== false && !upcoming && !unavailableTitle;
+    const safeList = String(listId || 'playlist').replace(/[^A-Za-z0-9_-]/g, '_');
+    const id = validId ? rawId : '__yst_unavailable__' + safeList + '_' + String(ordinal + 1);
+    const thumbnails = v.thumbnail && v.thumbnail.thumbnails;
+    const thumb = Array.isArray(thumbnails) && thumbnails.length ? String(thumbnails[thumbnails.length - 1].url || '') : (validId ? 'https://i.ytimg.com/vi/' + rawId + '/hqdefault.jpg' : '');
+    const seconds = v.lengthSeconds ? Number(v.lengthSeconds) : parseDuration(rendererText(v.lengthText));
+    return { id, title, duration: Number.isFinite(seconds) ? Math.max(0, seconds) : 0, thumb, url: available ? 'https://www.youtube.com/watch?v=' + rawId : '', order: ordinal, available, unavailable: !available, videoInfo: rendererText(v.videoInfo) };
+  }
+
+  function playlistTitleFromPayload(data) {
+    return rendererText(data && data.metadata && data.metadata.playlistMetadataRenderer && data.metadata.playlistMetadataRenderer.title)
+      || rendererText(data && data.header && data.header.playlistHeaderRenderer && data.header.playlistHeaderRenderer.title)
+      || String(data && data.header && data.header.pageHeaderRenderer && data.header.pageHeaderRenderer.pageTitle || '')
+      || rendererText(data && data.header && data.header.playlistSidebarPrimaryInfoRenderer && data.header.playlistSidebarPrimaryInfoRenderer.title)
+      || '';
+  }
+
+  function playlistPanelFor(data, listId) {
+    let found = null;
+    walk(data, node => {
+      const panel = node && node.playlistPanelRenderer;
+      if (!found && panel && String(panel.playlistId || '') === listId && Array.isArray(panel.contents)) found = panel;
     });
-    return out;
+    return found;
   }
-  function titleFromData(data) {
-    let title = '';
-    walk(data, o => {
-      if (title) return;
-      const h = o.playlistMetadataRenderer?.title || o.playlistSidebarPrimaryInfoRenderer?.title?.runs?.map(x=>x.text).join('');
-      if (h) title = h;
-    });
-    return title;
+
+  function selectedPlaylistContent(data) {
+    const root = data && data.contents && (data.contents.singleColumnBrowseResultsRenderer || data.contents.twoColumnBrowseResultsRenderer);
+    const tabs = root && root.tabs;
+    if (Array.isArray(tabs) && tabs.length) {
+      const selected = tabs.find(tab => tab && tab.tabRenderer && tab.tabRenderer.selected) || tabs[0];
+      return selected && selected.tabRenderer && selected.tabRenderer.content || root;
+    }
+    return root || data && data.contents || data;
   }
-  function continuationToken(data) {
-    let token = '';
-    walk(data, o => {
-      if (token) return;
-      if (o.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token)
-        token = o.continuationItemRenderer.continuationEndpoint.continuationCommand.token;
-    });
-    return token;
+
+  function findPlaylistVideoListRenderer(node, depth) {
+    depth = depth || 0;
+    if (!node || typeof node !== 'object' || depth > 18) return null;
+    if (node.playlistVideoListRenderer && Array.isArray(node.playlistVideoListRenderer.contents)) return node.playlistVideoListRenderer;
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const result = findPlaylistVideoListRenderer(child, depth + 1);
+        if (result) return result;
+      }
+      return null;
+    }
+    for (const key of ['sectionListRenderer', 'itemSectionRenderer', 'contents', 'content', 'tabs', 'tabRenderer']) {
+      if (node[key] === undefined) continue;
+      const result = findPlaylistVideoListRenderer(node[key], depth + 1);
+      if (result) return result;
+    }
+    return null;
   }
+
+  function playlistContinuation(container, rows) {
+    const tokens = new Set();
+    const continuations = container && container.continuations;
+    if (Array.isArray(continuations)) {
+      for (const item of continuations) {
+        const token = item && item.nextContinuationData && item.nextContinuationData.continuation || item && item.nextRadioContinuationData && item.nextRadioContinuationData.continuation || '';
+        if (token) tokens.add(token);
+      }
+    }
+    for (const row of rows || []) {
+      const token = row && row.continuationItemRenderer && row.continuationItemRenderer.continuationEndpoint && row.continuationItemRenderer.continuationEndpoint.continuationCommand && row.continuationItemRenderer.continuationEndpoint.continuationCommand.token;
+      if (token) tokens.add(token);
+    }
+    if (tokens.size > 1) throw new Error('YouTube returned ambiguous playlist continuation tokens; no partial catalog was saved.');
+    return tokens.values().next().value || '';
+  }
+
+  function parsePlaylistRows(rows, listId, offset, container) {
+    if (!Array.isArray(rows)) throw new Error('YouTube did not return a recognized playlist episode list.');
+    const items = [];
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') throw new Error('YouTube returned an invalid playlist row; no partial catalog was saved.');
+      if (row.playlistVideoRenderer || row.playlistPanelVideoRenderer) {
+        const episode = playlistRowEpisode(row, listId, offset + items.length);
+        if (episode) items.push(episode);
+        continue;
+      }
+      if (row.continuationItemRenderer) continue;
+      const banner = rendererText(row.messageRenderer && row.messageRenderer.text);
+      if (banner && /unavailable videos will be hidden|no videos available/i.test(banner)) continue;
+      const keys = Object.keys(row);
+      throw new Error('Unsupported playlist row (' + (keys[0] || 'unknown') + '); refresh stopped to avoid saving an incomplete episode list.');
+    }
+    return { items, token: playlistContinuation(container, rows) };
+  }
+
+  function parsePlaylistPage(data, listId, continuation, offset) {
+    continuation = Boolean(continuation);
+    offset = Number(offset || 0);
+    if (!data || typeof data !== 'object' || data.error) throw new Error('YouTube returned an invalid playlist response.');
+    let container = null;
+    if (continuation) {
+      container = data.continuationContents && (data.continuationContents.playlistVideoListContinuation || data.continuationContents.playlistPanelContinuation) || null;
+      if (!container) {
+        const actions = data.onResponseReceivedActions || data.onResponseReceivedEndpoints || [];
+        for (const action of actions) {
+          const append = action && action.appendContinuationItemsAction;
+          if (append && Array.isArray(append.continuationItems)) {
+            container = { contents: append.continuationItems, continuations: [] };
+            break;
+          }
+        }
+      }
+      if (!container || !Array.isArray(container.contents)) throw new Error('YouTube continuation did not contain playlist rows.');
+    } else {
+      const panel = playlistPanelFor(data, listId);
+      if (panel) container = panel;
+      else {
+        const renderer = findPlaylistVideoListRenderer(selectedPlaylistContent(data), 0);
+        if (renderer) container = renderer;
+      }
+      if (!container || !Array.isArray(container.contents)) throw new Error('YouTube did not return the requested playlist. It may be private, unavailable, or YouTube may have changed its page structure.');
+    }
+    const parsed = parsePlaylistRows(container.contents, listId, offset, container);
+    return { items: parsed.items, token: parsed.token, title: playlistTitleFromPayload(data), visitorData: String(data.responseContext && data.responseContext.visitorData || '') };
+  }
+
+  async function requestInnerTube(endpoint, payload, budget) {
+    if (endpoint !== 'browse' && endpoint !== 'search') throw new Error('Unsupported YouTube endpoint.');
+    const key = getApiKey();
+    if (!key) throw new Error('YouTube did not expose its InnerTube key. Reload the page and try again.');
+    const remaining = budget.deadline - Date.now();
+    if (remaining <= 0 || budget.requests >= budget.maxRequests || budget.bytes >= budget.maxBytes) throw new Error('YouTube catalog discovery reached its request, time, or size limit. No partial series was saved.');
+    budget.requests++;
+    const controller = new AbortController();
+    const timeoutMs = Math.max(1000, Math.min(12000, remaining));
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const context = getClientContext();
+      const client = context && context.client || {};
+      const version = String(client.clientVersion || '2.20260101.00.00');
+      const response = await fetch('/youtubei/v1/' + endpoint + '?key=' + encodeURIComponent(key) + '&prettyPrint=false', {
+        method: 'POST',
+        credentials: 'same-origin',
+        signal: controller.signal,
+        headers: { 'Content-Type': 'application/json', 'X-Youtube-Client-Name': '1', 'X-Youtube-Client-Version': version },
+        body: JSON.stringify({ context, ...payload })
+      });
+      const length = Number(response.headers && response.headers.get && response.headers.get('content-length') || 0);
+      if (length > budget.pageBytes) throw new Error('YouTube returned a response larger than the safe page limit.');
+      const body = await response.text();
+      const size = new TextEncoder().encode(body).length;
+      budget.bytes += size;
+      if (size > budget.pageBytes || budget.bytes > budget.maxBytes) throw new Error('YouTube playlist response exceeded the safe download limit. Existing episodes were kept.');
+      if (response.status === 429 || response.status === 503) throw new Error('YouTube is temporarily rate-limiting playlist discovery (HTTP ' + response.status + '). Try again later.');
+      if (!response.ok) throw new Error('YouTube playlist request failed (HTTP ' + response.status + ').');
+      try { return JSON.parse(body); } catch (_) { throw new Error('YouTube returned malformed playlist data. No partial catalog was saved.'); }
+    } catch (error) {
+      if (error && error.name === 'AbortError') throw new Error('YouTube playlist request timed out. No partial catalog was saved.');
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function fetchFullPlaylist(listId, options) {
+    options = options || {};
+    if (!isSuggestiblePlaylistId(listId)) throw new Error('This YouTube list is a mix, Watch Later, or another list type that cannot be followed as a series.');
+    const budget = options.budget || { requests: 0, bytes: 0, maxRequests: 100, maxBytes: 20 * 1024 * 1024, pageBytes: 5 * 1024 * 1024, deadline: Date.now() + 60000 };
+    const maxPages = Number.isFinite(options.maxPages) ? options.maxPages : 100;
+    let first = null;
+    let firstError = null;
+    for (const params of ['wgYCCAA%3D', '']) {
+      try {
+        const payload = { browseId: 'VL' + listId };
+        if (params) payload.params = params;
+        const response = await requestInnerTube('browse', payload, budget);
+        first = parsePlaylistPage(response, listId, false, 0);
+        break;
+      } catch (error) {
+        firstError = error;
+        if (Date.now() >= budget.deadline || budget.requests >= budget.maxRequests || budget.bytes >= budget.maxBytes) break;
+      }
+    }
+    if (!first) throw firstError || new Error('Could not load the complete playlist catalog.');
+    const items = [];
+    let title = first.title || '';
+    const appendItems = pageItems => {
+      for (const item of pageItems) {
+        if (!item || !item.id) continue;
+        items.push({ ...item, order: items.length });
+        if (items.length > 5000) throw new Error('Playlist contains more than 5,000 rows; no partial catalog was saved.');
+      }
+    };
+    appendItems(first.items);
+    let token = first.token;
+    let pages = 0;
+    const seenTokens = new Set();
+    while (token) {
+      if (pages >= maxPages) throw new Error('Playlist catalog remains incomplete after ' + pages + ' continuation pages; no partial catalog was saved.');
+      if (seenTokens.has(token)) throw new Error('YouTube repeated a continuation token; no partial catalog was saved.');
+      seenTokens.add(token);
+      pages++;
+      const response = await requestInnerTube('browse', { continuation: token }, budget);
+      const page = parsePlaylistPage(response, listId, true, items.length);
+      if (page.title) title = page.title;
+      appendItems(page.items);
+      token = page.token;
+    }
+    if (!items.length) throw new Error('No episodes were found in this playlist.');
+    if (Date.now() >= budget.deadline) throw new Error('Playlist catalog exceeded its time limit; no partial catalog was saved.');
+    const domTitle = listId === getPlaylistId() ? playlistTitleFromDOM() : '';
+    return { items, title: title || domTitle, pages };
+  }
+
   function playlistTitleFromDOM() {
-    return text(document.querySelector('ytd-playlist-header-renderer #title')) ||
-      text(document.querySelector('ytd-playlist-header-renderer h1')) ||
-      text(document.querySelector('ytd-playlist-sidebar-primary-info-renderer h1')) ||
-      document.title.replace(/\s+-\s+YouTube$/, '').trim() || 'YouTube playlist';
+    return text(document.querySelector('ytd-playlist-header-renderer #title'))
+      || text(document.querySelector('ytd-playlist-header-renderer h1'))
+      || text(document.querySelector('ytd-playlist-sidebar-primary-info-renderer h1'))
+      || (getPlaylistId() ? document.title.replace(/\s+-\s+YouTube$/, '').trim() : '')
+      || '';
   }
-  function domPlaylistItems() {
-    const out = [], seen = new Set();
-    const selectors = 'ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer, ytd-rich-item-renderer, ytd-video-renderer';
-    for (const node of document.querySelectorAll(selectors)) {
+
+  function domPlaylistItems(listId) {
+    listId = listId || getPlaylistId();
+    const out = [];
+    const seen = new Set();
+    for (const node of document.querySelectorAll('ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer')) {
+      if (node.matches('ytd-playlist-panel-video-renderer')) {
+        const panel = node.closest('ytd-playlist-panel-renderer');
+        const panelId = panel && (panel.getAttribute('playlist-id') || panel.data && panel.data.playlistId) || '';
+        if (panelId && panelId !== listId) continue;
+      }
       const a = node.querySelector('a#video-title, a#thumbnail[href*="watch"], a[href*="/watch?v="]');
       if (!a) continue;
-      let u; try { u = new URL(a.getAttribute('href'), location.origin); } catch (_) { continue; }
-      const id = u.searchParams.get('v');
-      if (!id || seen.has(id)) continue;
-      if (location.pathname === '/watch' && !node.closest('ytd-playlist-panel-renderer') && !node.matches('ytd-playlist-video-renderer')) continue;
+      let u;
+      try { u = new URL(a.getAttribute('href'), location.origin); } catch (_) { continue; }
+      const id = u.searchParams.get('v') || '';
+      if (!/^[A-Za-z0-9_-]{11}$/.test(id) || seen.has(id)) continue;
       seen.add(id);
       const title = text(node.querySelector('#video-title')) || a.title || 'Untitled episode';
       const durationNode = node.querySelector('ytd-thumbnail-overlay-time-status-renderer, #overlays #text');
-      out.push({ id, title, duration: parseDuration(text(durationNode)), thumb: node.querySelector('img')?.src || `https://i.ytimg.com/vi/${id}/hqdefault.jpg`, url: `https://www.youtube.com/watch?v=${id}` });
+      out.push({ id, title, duration: parseDuration(text(durationNode)), thumb: node.querySelector('img') && node.querySelector('img').src || 'https://i.ytimg.com/vi/' + id + '/hqdefault.jpg', url: 'https://www.youtube.com/watch?v=' + id, order: out.length, available: true, unavailable: false });
     }
     return out;
-  }
-  async function fetchFullPlaylist(listId) {
-    if (!listId) throw new Error('Open a playlist URL containing list= first.');
-    const data = getInitialData();
-    let items = data ? findPlaylistRenderer(data) : [];
-    // YouTube's playlist renderer may be nested inside initial data; include currently-rendered items too.
-    const dom = domPlaylistItems();
-    const seen = new Set(items.map(x => x.id));
-    for (const ep of dom) if (!seen.has(ep.id)) { items.push(ep); seen.add(ep.id); }
-    let token = data ? continuationToken(data) : '';
-    const key = getApiKey();
-    let pages = 0;
-    while (token && key && pages < 60) {
-      pages++;
-      const response = await fetch(`/youtubei/v1/browse?key=${encodeURIComponent(key)}&prettyPrint=false`, {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json', 'X-Youtube-Client-Name': '1', 'X-Youtube-Client-Version': getClientContext().client?.clientVersion || '2.20260101.00.00' },
-        body: JSON.stringify({ context: getClientContext(), continuation: token })
-      });
-      if (!response.ok) throw new Error(`YouTube playlist request failed (${response.status}).`);
-      const next = await response.json();
-      for (const ep of findPlaylistRenderer(next)) {
-        if (!seen.has(ep.id)) { items.push(ep); seen.add(ep.id); }
-      }
-      token = continuationToken(next);
-      if (!findPlaylistRenderer(next).length && token && pages > 3) break;
-    }
-    // Preserve YouTube order as provided by the playlist renderer.
-    return { items, title: titleFromData(data) || playlistTitleFromDOM(), pages };
   }
   function findSeries(id) {
     if (!id) return undefined;
@@ -253,14 +436,17 @@
     const merged = [];
     items.forEach((ep, i) => {
       const prev = old.get(ep.id);
-      const next = { ...prev, ...ep, order: i };
+      const next = { ...prev, ...ep, order: i, unavailable: Boolean(ep.unavailable || ep.available === false) };
       merged.push(next);
-      const st = stateFor(ep.id);
-      setState(ep.id, { title: ep.title || st.title, duration: ep.duration || st.duration }, false);
+      if (!next.unavailable && /^[A-Za-z0-9_-]{11}$/.test(ep.id)) {
+        const st = stateFor(ep.id);
+        setState(ep.id, { title: ep.title || st.title, duration: ep.duration || st.duration }, false);
+      }
     });
     // Keep previously-known items that may be unavailable/removed, at the end.
     for (const [id, ep] of old) if (!merged.some(x => x.id === id)) merged.push({ ...ep, order: merged.length, unavailable: ep.manuallyAdded ? false : true });
     series.title = title || series.title;
+    if (typeof series.playbackReverse !== 'boolean') series.playbackReverse = inferReverseOrder(merged);
     series.episodes = merged;
     series.updatedAt = Date.now();
     series.lastSyncedAt = Date.now();
@@ -281,11 +467,7 @@
       toast(`Synced “${s.title}” · ${s.episodes.length} episodes${pages ? ` · ${pages} continuation pages` : ''}`);
     } catch (e) {
       console.error('[YouTube Series] playlist sync failed', e);
-      const dom = domPlaylistItems();
-      if (dom.length) {
-        const s = mergeSeries(id, playlistTitleFromDOM(), dom);
-        renderPanel(); toast(`Partial sync: ${s.episodes.length} loaded episodes. Full sync failed: ${e.message}`);
-      } else toast(e.message || 'Playlist sync failed.');
+      toast((e.message || 'Playlist sync failed.') + ' Existing saved episodes were kept; no partial catalog was saved.');
     } finally { syncBusy = false; }
   }
   function stats(s) {
