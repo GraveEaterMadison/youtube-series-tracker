@@ -249,3 +249,33 @@ test('playback tracker never silently appends a video absent from the followed c
   assert.match(track, /const inListedSeries=Boolean\(listSeries && listSeries\.episodes\.some/);
   assert.doesNotMatch(track, /s\.episodes\.push\(\{id:meta\.id/);
 });
+
+
+test('wrapped playlist-panel rows retain the original YouTube episode index', () => {
+  const rendererText = vm.runInNewContext('(' + extractSimpleFunction(source, 'rendererText') + ')');
+  const rowEpisode = vm.runInNewContext('(' + extractSimpleFunction(source, 'playlistRowEpisode') + ')', {
+    rendererText,
+    parseDuration: () => 0
+  });
+  const parseRows = vm.runInNewContext('(' + extractSimpleFunction(source, 'parsePlaylistRows') + ')', {
+    rendererText,
+    playlistRowEpisode: rowEpisode,
+    playlistContinuation: () => ''
+  });
+  const row = {
+    playlistPanelVideoWrapperRenderer: {
+      primaryRenderer: {
+        playlistPanelVideoRenderer: {
+          videoId: 'aaaaaaaaaaa',
+          title: { simpleText: 'Episode 7' },
+          index: { simpleText: '7' }
+        }
+      }
+    }
+  };
+  const parsed = parseRows([row], 'PLabcdefghijk', 0, {});
+  assert.equal(parsed.items.length, 1);
+  assert.equal(parsed.items[0].id, 'aaaaaaaaaaa');
+  assert.equal(parsed.items[0].order, 6);
+  assert.equal(parsed.items[0].available, true);
+});
