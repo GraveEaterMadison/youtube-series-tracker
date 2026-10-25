@@ -173,7 +173,10 @@
   }
 
   function playlistRowEpisode(row, listId, ordinal) {
-    const v = row && (row.playlistVideoRenderer || row.playlistPanelVideoRenderer);
+    const wrapper = row && row.playlistPanelVideoWrapperRenderer;
+    const v = row && (row.playlistVideoRenderer || row.playlistPanelVideoRenderer
+      || wrapper && wrapper.primaryRenderer && wrapper.primaryRenderer.playlistPanelVideoRenderer
+      || wrapper && wrapper.playlistPanelVideoRenderer);
     if (!v) return null;
     const rawId = String(v.videoId || '');
     const validId = /^[A-Za-z0-9_-]{11}$/.test(rawId);
@@ -187,7 +190,9 @@
     const thumbnails = v.thumbnail && v.thumbnail.thumbnails;
     const thumb = Array.isArray(thumbnails) && thumbnails.length ? String(thumbnails[thumbnails.length - 1].url || '') : (validId ? 'https://i.ytimg.com/vi/' + rawId + '/hqdefault.jpg' : '');
     const seconds = v.lengthSeconds ? Number(v.lengthSeconds) : parseDuration(rendererText(v.lengthText));
-    return { id, title, duration: Number.isFinite(seconds) ? Math.max(0, seconds) : 0, thumb, url: available ? 'https://www.youtube.com/watch?v=' + rawId : '', order: ordinal, available, unavailable: !available, videoInfo: rendererText(v.videoInfo) };
+    const displayedIndex = Number(rendererText(v.index));
+    const order = Number.isInteger(displayedIndex) && displayedIndex > 0 ? displayedIndex - 1 : ordinal;
+    return { id, title, duration: Number.isFinite(seconds) ? Math.max(0, seconds) : 0, thumb, url: available ? 'https://www.youtube.com/watch?v=' + rawId : '', order, available, unavailable: !available, videoInfo: rendererText(v.videoInfo) };
   }
 
   function playlistTitleFromPayload(data) {
@@ -258,7 +263,7 @@
     const items = [];
     for (const row of rows) {
       if (!row || typeof row !== 'object') throw new Error('YouTube returned an invalid playlist row; no partial catalog was saved.');
-      if (row.playlistVideoRenderer || row.playlistPanelVideoRenderer) {
+      if (row.playlistVideoRenderer || row.playlistPanelVideoRenderer || row.playlistPanelVideoWrapperRenderer) {
         const episode = playlistRowEpisode(row, listId, offset + items.length);
         if (episode) items.push(episode);
         continue;
@@ -366,7 +371,8 @@
     const appendItems = pageItems => {
       for (const item of pageItems) {
         if (!item || !item.id) continue;
-        items.push({ ...item, order: items.length });
+        const order = Number.isInteger(item.order) && item.order >= 0 ? item.order : items.length;
+        items.push({ ...item, order });
         if (items.length > 5000) throw new Error('Playlist contains more than 5,000 rows; no partial catalog was saved.');
       }
     };
@@ -388,14 +394,16 @@
     if (!items.length) throw new Error('No episodes were found in this playlist.');
     if (Date.now() >= budget.deadline) throw new Error('Playlist catalog exceeded its time limit; no partial catalog was saved.');
     const domTitle = listId === getPlaylistId() ? playlistTitleFromDOM() : '';
-    return { items, title: title || domTitle, pages };
+    const inferredTitle = listId === getPlaylistId() ? (seriesSearchTitle(videoTitle()) || videoTitle()) : '';
+    return { items, title: title || domTitle || inferredTitle, pages };
   }
 
   function playlistTitleFromDOM() {
     return text(document.querySelector('ytd-playlist-header-renderer #title'))
       || text(document.querySelector('ytd-playlist-header-renderer h1'))
       || text(document.querySelector('ytd-playlist-sidebar-primary-info-renderer h1'))
-      || (getPlaylistId() ? document.title.replace(/\s+-\s+YouTube$/, '').trim() : '')
+      || text(document.querySelector('ytd-playlist-panel-renderer #header-description #view-more'))
+      || (location.pathname.startsWith('/playlist') ? document.title.replace(/\s+-\s+YouTube$/, '').trim() : '')
       || '';
   }
 
@@ -585,7 +593,7 @@
         if (!catalog.items.some(item => item.id === videoId && item.available !== false && !item.unavailable)) return;
         verified.push({
           id: candidate.id,
-          title: catalog.title || candidate.title || candidate.id,
+          title: catalog.title || candidate.title || seriesSearchTitle(details.title) || details.title || candidate.id,
           owner: candidate.owner || '',
           thumb: catalog.items.find(item => item.available !== false && !item.unavailable)?.thumb || candidate.thumb || '',
           items: catalog.items,
@@ -645,15 +653,20 @@
     const merged = [];
     items.forEach((ep, i) => {
       const prev = old.get(ep.id);
-      const next = { ...prev, ...ep, order: i, unavailable: Boolean(ep.unavailable || ep.available === false) };
+      const order = Number.isInteger(ep.order) && ep.order >= 0 ? ep.order : i;
+      const next = { ...prev, ...ep, order, unavailable: Boolean(ep.unavailable || ep.available === false) };
       merged.push(next);
       if (!next.unavailable && /^[A-Za-z0-9_-]{11}$/.test(ep.id)) {
         const st = stateFor(ep.id);
         setState(ep.id, { title: ep.title || st.title, duration: ep.duration || st.duration }, false);
       }
     });
-    // Keep previously-known items that may be unavailable/removed, at the end.
-    for (const [id, ep] of old) if (!merged.some(x => x.id === id)) merged.push({ ...ep, order: merged.length, unavailable: ep.manuallyAdded ? false : true });
+    // Keep previously-known items that may be unavailable/removed, after the verified catalog.
+    let tailOrder = merged.reduce((max, ep) => Math.max(max, Number.isInteger(ep.order) ? ep.order : -1), -1) + 1;
+    for (const [id, ep] of old) {
+      if (merged.some(x => x.id === id)) continue;
+      merged.push({ ...ep, order: tailOrder++, unavailable: ep.manuallyAdded ? false : true });
+    }
     series.title = title || series.title;
     if (typeof series.playbackReverse !== 'boolean') series.playbackReverse = inferReverseOrder(merged);
     series.episodes = merged;
