@@ -422,6 +422,215 @@
     }
     return out;
   }
+  function seriesSearchTitle(title) {
+    const value = String(title || '').replace(/\[[^\]]*\]|\([^)]*(?:sub|dub|1080p|720p|official|english)[^)]*\)/gi, ' ');
+    const season = /\b(?:season|series)\s*0*(\d{1,3})\b/i.exec(value);
+    const parts = value.split(/[|｜]/).map(part => part.trim()).filter(Boolean).map(part => part
+      .replace(/\bS\d{1,3}[ ._-]*E\d{1,4}\b/gi, ' ')
+      .replace(/\b(?:episode|ep\.?|part|chapter)\s*#?\s*\d{1,4}\b/gi, ' ')
+      .replace(/\b\d{1,4}\s*\/\s*\d{1,4}\b/g, ' ')
+      .replace(/\b(?:full\s+episodes?|official\s+video|english\s+sub(?:titles?)?|english\s+dub|subbed|dubbed|1080p|720p|4k|hd)\b/gi, ' ')
+      .replace(/\s+/g, ' ').trim()).filter(Boolean);
+    let name = parts.sort((a,b) => b.length - a.length)[0] || '';
+    if (season && name && !new RegExp('\\b(?:season|series)\\s*0*' + season[1] + '\\b', 'i').test(name)) {
+      name = (name + ' Season ' + season[1]).trim();
+    }
+    return name.slice(0, 160);
+  }
+
+  function episodeNumberFromTitle(title) {
+    const value = String(title || '');
+    const compact = /\bS(\d{1,3})[ ._-]*E(\d{1,4})\b/i.exec(value);
+    if (compact) {
+      if (/\bS\d{1,3}[ ._-]*E\d{1,4}\b/i.test(value.slice(compact.index + compact[0].length))) return null;
+      return Number(compact[1]) * 10000 + Number(compact[2]);
+    }
+    const all = [...value.matchAll(/\b(?:episode|ep\.?|part|chapter)\s*#?\s*(\d{1,4})\b/gi)];
+    if (all.length !== 1) return null;
+    const season = /\b(?:season|series)\s*0*(\d{1,3})\b/i.exec(value);
+    return (season ? Number(season[1]) : 0) * 10000 + Number(all[0][1]);
+  }
+
+  function inferReverseOrder(items) {
+    const playable = (items || []).filter(item =>
+      item && item.available !== false && !item.unavailable && /^[A-Za-z0-9_-]{11}$/.test(item.id));
+    if (playable.length < 2) return false;
+    const values = playable.map(item => episodeNumberFromTitle(item.title));
+    const recognized = values.filter(Number.isFinite);
+    if (recognized.length < 2 || recognized.length * 5 < playable.length * 3) return false;
+    let direction = 0;
+    let prior = null;
+    for (const value of values) {
+      if (!Number.isFinite(value)) continue;
+      if (prior !== null) {
+        const next = Math.sign(value - prior);
+        if (!next || (direction && next !== direction)) return false;
+        direction = next;
+      }
+      prior = value;
+    }
+    return direction < 0;
+  }
+
+  function orderedEpisodes(series) {
+    const episodes = [...(series && series.episodes || [])].sort((a,b) => a.order - b.order);
+    return series && series.playbackReverse ? episodes.reverse() : episodes;
+  }
+
+  function playlistIdsInDescription(description) {
+    const ids = [];
+    const seen = new Set();
+    const urls = /https?:\/\/[^\s<>"']+/g;
+    let match;
+    while ((match = urls.exec(String(description || '').slice(0, 20000))) && ids.length < 4) {
+      try {
+        const parsed = new URL(match[0].replace(/[).,;]+$/, ''));
+        const id = parsed.searchParams.get('list') || '';
+        if (isDiscoveryPlaylistId(id) && !seen.has(id)) {
+          seen.add(id);
+          ids.push(id);
+        }
+      } catch (_) {}
+    }
+    return ids;
+  }
+
+  function currentVideoDetails(videoId) {
+    const details = window.ytInitialPlayerResponse && window.ytInitialPlayerResponse.videoDetails;
+    if (details && details.videoId === videoId) {
+      return {
+        id: videoId,
+        title: String(details.title || videoTitle()),
+        author: String(details.author || ''),
+        channelId: String(details.channelId || ''),
+        description: String(details.shortDescription || '')
+      };
+    }
+    const channel = document.querySelector('ytd-video-owner-renderer a[href*="/channel/"], #owner #channel-name a');
+    let channelId = '';
+    try {
+      if (channel && channel.href) {
+        const url = new URL(channel.href, location.origin);
+        channelId = url.pathname.split('/channel/')[1]?.split(/[/?#]/)[0] || '';
+      }
+    } catch (_) {}
+    return {
+      id: videoId,
+      title: videoTitle(),
+      author: text(channel),
+      channelId,
+      description: ''
+    };
+  }
+
+  function normalizeSearchTokens(value) {
+    return String(value || '').toLocaleLowerCase().split(/[^\p{L}\p{N}]+/u).filter(word => word.length > 2);
+  }
+
+  function parsePlaylistSearchCandidates(data, details) {
+    const results = new Map();
+    const expectedTitle = seriesSearchTitle(details.title).toLocaleLowerCase();
+    const expectedTokens = new Set(normalizeSearchTokens(expectedTitle));
+    const expectedSeason = /\b(?:season|series)\s*0*(\d{1,3})\b/i.exec(details.title)?.[1] || '';
+    walk(data && (data.contents || data), node => {
+      for (const key of ['playlistRenderer', 'compactPlaylistRenderer', 'gridPlaylistRenderer']) {
+        const playlist = node && node[key];
+        if (!playlist) continue;
+        const id = String(playlist.playlistId || '');
+        if (!isDiscoveryPlaylistId(id) || results.has(id)) continue;
+        const title = rendererText(playlist.title) || id;
+        const byline = playlist.shortBylineText || playlist.longBylineText || playlist.ownerText || null;
+        const owner = rendererText(byline);
+        let ownerMatches = false;
+        for (const run of byline && byline.runs || []) {
+          const browseId = run && run.navigationEndpoint && run.navigationEndpoint.browseEndpoint && run.navigationEndpoint.browseEndpoint.browseId || '';
+          if (details.channelId && browseId === details.channelId) ownerMatches = true;
+        }
+        const tokens = new Set(normalizeSearchTokens(title));
+        let overlap = 0;
+        for (const token of expectedTokens) if (tokens.has(token)) overlap++;
+        let score = ownerMatches ? 1000 : 0;
+        score += overlap * 8;
+        if (expectedTitle && title.toLocaleLowerCase().includes(expectedTitle)) score += 60;
+        const season = /\b(?:season|series)\s*0*(\d{1,3})\b/i.exec(title)?.[1] || '';
+        if (expectedSeason && season) score += season === expectedSeason ? 80 : -80;
+        const thumbnails = playlist.thumbnail && playlist.thumbnail.thumbnails;
+        const thumb = Array.isArray(thumbnails) && thumbnails.length ? thumbnails[thumbnails.length - 1].url : '';
+        results.set(id, { id, title, owner, thumb, score, items: null, reverse: false });
+      }
+    });
+    return [...results.values()].sort((a,b) => b.score - a.score).slice(0, 30);
+  }
+
+  async function discoverPlaylistsForVideo(videoId) {
+    const cached = discoveryCache.get(videoId);
+    if (cached && cached.expiresAt > Date.now()) return cached.matches;
+    const details = currentVideoDetails(videoId);
+    const budget = {
+      requests: 0,
+      bytes: 0,
+      maxRequests: 18,
+      maxBytes: 16 * 1024 * 1024,
+      pageBytes: 5 * 1024 * 1024,
+      deadline: Date.now() + 25000
+    };
+    const verified = [];
+    const checked = new Set();
+    const linked = playlistIdsInDescription(details.description);
+    const verifyCandidate = async candidate => {
+      if (checked.has(candidate.id) || budget.requests >= budget.maxRequests || Date.now() >= budget.deadline) return;
+      checked.add(candidate.id);
+      try {
+        const catalog = await fetchFullPlaylist(candidate.id, { budget, maxPages: 18 });
+        if (!catalog.items.some(item => item.id === videoId && item.available !== false && !item.unavailable)) return;
+        verified.push({
+          id: candidate.id,
+          title: catalog.title || candidate.title || candidate.id,
+          owner: candidate.owner || '',
+          thumb: catalog.items.find(item => item.available !== false && !item.unavailable)?.thumb || candidate.thumb || '',
+          items: catalog.items,
+          reverse: inferReverseOrder(catalog.items),
+          score: Number(candidate.score || 0)
+        });
+      } catch (error) {
+        console.debug('[YouTube Series] candidate catalog could not be verified:', candidate.id, error && error.message || error);
+      }
+    };
+    for (const id of linked) await verifyCandidate({ id, title: '', owner: '', thumb: '', score: 2000 });
+    if (verified.length) {
+      const matches = verified.sort((a,b) => b.score - a.score);
+      discoveryCache.set(videoId, { expiresAt: Date.now() + 60 * 60 * 1000, matches });
+      return matches;
+    }
+    const seriesTitle = seriesSearchTitle(details.title) || details.title;
+    const queries = [...new Set([
+      (details.author ? details.author + ' ' : '') + seriesTitle,
+      (details.author ? details.author + ' ' : '') + details.title
+    ].map(value => value.trim().slice(0, 180)).filter(value => value.length >= 3))].slice(0, 2);
+    const candidates = new Map();
+    for (const query of queries) {
+      if (budget.requests >= budget.maxRequests || Date.now() >= budget.deadline) break;
+      try {
+        const response = await requestInnerTube('search', { query, params: 'EgIQAw==' }, budget);
+        for (const candidate of parsePlaylistSearchCandidates(response, details)) {
+          const previous = candidates.get(candidate.id);
+          if (!previous || candidate.score > previous.score) candidates.set(candidate.id, candidate);
+        }
+      } catch (error) {
+        console.debug('[YouTube Series] playlist search unavailable:', error && error.message || error);
+        break;
+      }
+    }
+    for (const candidate of [...candidates.values()].sort((a,b) => b.score - a.score).slice(0, 8)) {
+      if (budget.requests >= budget.maxRequests || Date.now() >= budget.deadline) break;
+      await verifyCandidate(candidate);
+      if (verified.length >= 4) break;
+    }
+    const matches = verified.sort((a,b) => b.score - a.score);
+    discoveryCache.set(videoId, { expiresAt: Date.now() + (matches.length ? 60 : 5) * 60 * 1000, matches });
+    return matches;
+  }
+
   function findSeries(id) {
     if (!id) return undefined;
     return db.series.find(s => (s.playlistId && s.playlistId === id) || s.id === id);
