@@ -1529,7 +1529,7 @@
           if (getVideoId() === capturedVideo && catalog.items.some(item => item.id === capturedVideo && item.available !== false && !item.unavailable)) {
             finishAutoFollow({
               id: listId,
-              title: catalog.title || playlistTitleFromDOM() || listId,
+              title: catalog.title || playlistTitleFromDOM() || seriesSearchTitle(currentVideoDetails(capturedVideo).title) || currentVideoDetails(capturedVideo).title || listId,
               items: catalog.items,
               reverse: inferReverseOrder(catalog.items),
               score: 2000
