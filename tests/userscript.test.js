@@ -111,23 +111,23 @@ test('readme describes beta status and local storage limitations', () => {
 });
 
 test('auto-next never repeats an already-watched episode when no unwatched episode follows', () => {
-  const watched = new Set(['current', 'later-watched', 'last-watched']);
+  const watched = new Set(['aaaaaaaaaaa', 'bbbbbbbbbbb', 'ccccccccccc']);
   const orderedEpisodes = vm.runInNewContext(`(${extractSimpleFunction(source, 'orderedEpisodes')})`);
   const chooseNext = vm.runInNewContext(`(${extractSimpleFunction(source, 'chooseNext')})`, {
     stateFor: id => ({ watched: watched.has(id) }),
-    chooseContinue: () => ({ id: 'continue-fallback' }),
+    chooseContinue: () => ({ id: 'ddddddddddd' }),
     orderedEpisodes
   });
   const series = { episodes: [
-    { id: 'current', order: 0 },
-    { id: 'later-watched', order: 1 },
-    { id: 'last-watched', order: 2 }
+    { id: 'aaaaaaaaaaa', order: 0 },
+    { id: 'bbbbbbbbbbb', order: 1 },
+    { id: 'ccccccccccc', order: 2 }
   ] };
-  assert.equal(chooseNext(series, 'current'), null);
+  assert.equal(chooseNext(series, 'aaaaaaaaaaa'), null);
 });
 
 test('auto-next selects the next unwatched episode in playlist order', () => {
-  const watched = new Set(['current', 'watched-middle']);
+  const watched = new Set(['aaaaaaaaaaa', 'bbbbbbbbbbb']);
   const orderedEpisodes = vm.runInNewContext(`(${extractSimpleFunction(source, 'orderedEpisodes')})`);
   const chooseNext = vm.runInNewContext(`(${extractSimpleFunction(source, 'chooseNext')})`, {
     stateFor: id => ({ watched: watched.has(id) }),
@@ -135,11 +135,11 @@ test('auto-next selects the next unwatched episode in playlist order', () => {
     orderedEpisodes
   });
   const series = { episodes: [
-    { id: 'current', order: 0 },
-    { id: 'watched-middle', order: 1 },
-    { id: 'next-unwatched', order: 2 }
+    { id: 'aaaaaaaaaaa', order: 0 },
+    { id: 'bbbbbbbbbbb', order: 1 },
+    { id: 'ccccccccccc', order: 2 }
   ] };
-  assert.equal(chooseNext(series, 'current').id, 'next-unwatched');
+  assert.equal(chooseNext(series, 'aaaaaaaaaaa').id, 'ccccccccccc');
 });
 
 test('playlist refresh and history scan can batch state changes into one write', () => {
