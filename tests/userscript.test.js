@@ -57,7 +57,7 @@ test('sidebar button relocates when YouTube navigation loads after the userscrip
 });
 
 test('one-by-one series builder actions are wired and versioned', () => {
-  assert.match(source, /^\/\/ @version\s+2\.2\.2$/m);
+  assert.match(source, /^\/\/ @version\s+2\.3\.0$/m);
   assert.match(source, /id="yst2-add-current"/);
   assert.match(source, /function showAddVideoDialog\(\)/);
   assert.match(source, /function saveVideoToSeries\(series, meta\)/);
@@ -153,4 +153,14 @@ test('video listeners are detached before tracking a new YouTube route', () => {
   assert.match(track, /video\.removeEventListener\('ended',onEnded\)/);
   assert.match(track, /if\(!meta\|\|!video\)\{\s*if\(activeVideoCleanup\)/);
   assert.doesNotMatch(source, /const listenerVideos = new WeakSet\(\)/);
+});
+
+test('library UI includes search, progress overview, artwork, accessible tabs, and responsive polish', () => {
+  assert.match(source, /id="yst2-search"/);
+  assert.match(source, /id="yst2-dashboard"/);
+  assert.match(source, /class="yst2-series-art"/);
+  assert.match(source, /aria-selected=/);
+  assert.ok(source.includes('data-sync="${esc(s.id)}"'));
+  assert.match(source, /const applySearch = \(\)/);
+  assert.match(source, /prefers-reduced-motion:reduce/);
 });

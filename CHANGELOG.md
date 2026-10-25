@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.3.0
+
+- Refresh the tracker panel with a compact overview dashboard, clearer primary actions, searchable series/episode/history lists, series cover art, progress indicators, and updated empty states.
+- Improve small-screen layouts, tab semantics, keyboard focus visibility, reduced-motion support, and accessible button labels.
+- Fix the playlist refresh button's series ID interpolation so it targets the selected series.
+- Add regression coverage for the refreshed UI and search controls.
+
 ## 2.2.2
 
 - Fix auto-next so it stops instead of repeating a watched episode when no unwatched episode remains later in the series.

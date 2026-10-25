@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Series Tracker
 // @namespace    https://github.com/GraveEaterMadison/youtube-series-tracker
-// @version      2.2.2
+// @version      2.3.0
 // @description  Build YouTube series from playlists or add individual videos, with automatic default series names, local progress, watched status, history matching, and optional auto-next.
 // @author       Zero
 // @license      MIT
@@ -27,6 +27,7 @@
   const AUTO_SYNC_KEY = 'yst2-last-sync';
   let db = loadDB();
   let activeTab = 'library';
+  let librarySearch = '';
   let currentVideoId = '';
   let activeVideo = null;
   let tickTimer = null;
@@ -450,15 +451,24 @@
 
   function seriesHTML(s) {
     const st = stats(s), cont = chooseContinue(s);
-    return `<section class="yst2-series">
-      <header class="yst2-serieshead"><div class="yst2-seriestitle">${esc(s.title)}</div>
-      ${s.playlistId ? '<button class="yst2-icon" data-sync="${esc(s.id)}" title="Refresh entire playlist">↻</button>' : '<span class="yst2-manual-label">Manual series</span>'}
-      <button class="yst2-icon" data-edit="${esc(s.id)}" title="Rename series">✎</button>
-      <button class="yst2-icon danger" data-remove="${esc(s.id)}" title="Remove series">×</button></header>
-      <div class="yst2-muted">${st.watched}/${st.total} watched · ${st.pct}% complete · ${st.active} in progress${st.left?` · ${fmt(st.left)} remaining`:''}</div>
-      <div class="yst2-bar big"><i style="width:${st.pct}%"></i></div>
-      ${cont?`<button class="yst2-continue" data-continue="${esc(s.id)}">▶ Continue watching <span>${esc(cont.title)}</span></button>`:'<div class="yst2-done">✓ All episodes watched</div>'}
-      <details class="yst2-details"><summary>Episodes <span>${st.total}</span></summary>
+    const cover = s.episodes[0]?.thumb || (s.episodes[0]?.id ? `https://i.ytimg.com/vi/${s.episodes[0].id}/hqdefault.jpg` : '');
+    return `<section class="yst2-series yst2-filter-item">
+      <div class="yst2-series-overview">
+        <div class="yst2-series-art">${cover ? `<img loading="lazy" src="${esc(cover)}" alt="">` : '<div class="yst2-series-art-placeholder">▶</div>'}<span>${st.total} eps</span></div>
+        <div class="yst2-series-info">
+          <header class="yst2-serieshead">
+            <div class="yst2-seriestitle">${esc(s.title)}</div>
+            ${s.playlistId ? `<button class="yst2-icon" data-sync="${esc(s.id)}" title="Refresh entire playlist" aria-label="Refresh ${esc(s.title)}">↻</button>` : '<span class="yst2-manual-label">Manual</span>'}
+            <button class="yst2-icon" data-edit="${esc(s.id)}" title="Rename series" aria-label="Rename ${esc(s.title)}">✎</button>
+            <button class="yst2-icon danger" data-remove="${esc(s.id)}" title="Remove series" aria-label="Remove ${esc(s.title)}">×</button>
+          </header>
+          <div class="yst2-muted">${st.watched}/${st.total} watched <span class="yst2-dot">·</span> ${st.active} in progress</div>
+          <div class="yst2-bar big" role="progressbar" aria-label="${esc(s.title)} progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${st.pct}"><i style="width:${st.pct}%"></i></div>
+          <div class="yst2-series-footline"><span class="yst2-progress-label">${st.pct}% complete</span>${st.left ? `<span>${fmt(st.left)} left</span>` : ''}</div>
+          ${cont ? `<button class="yst2-continue" data-continue="${esc(s.id)}"><span class="yst2-continue-icon">▶</span><span class="yst2-continue-copy"><strong>Continue watching</strong><small>${esc(cont.title)}</small></span><span class="yst2-continue-arrow">↗</span></button>` : '<div class="yst2-done">✓ All episodes watched</div>'}
+        </div>
+      </div>
+      <details class="yst2-details"><summary><span>Episodes</span><span class="yst2-summary-count">${st.total}</span><span class="yst2-summary-spacer"></span><span class="yst2-summary-hint">View list</span><span class="yst2-chevron">⌄</span></summary>
         <div class="yst2-episode-list">${[...s.episodes].sort((a,b)=>a.order-b.order).map(e=>episodeHTML(s,e)).join('')}</div>
       </details>
     </section>`;
@@ -468,17 +478,42 @@
     const total = db.series.reduce((n,s)=>n+s.episodes.length,0);
     const watched = db.series.reduce((n,s)=>n+s.episodes.filter(e=>stateFor(e.id).watched).length,0);
     const allCont = db.series.map(s=>({s,e:chooseContinue(s)})).filter(x=>x.e);
+    const pct = total ? Math.round(watched / total * 100) : 0;
+    const historyCount = Object.keys(db.history).length;
     let body = '';
     if (activeTab === 'library') body = db.series.length ? db.series.map(seriesHTML).join('') :
-      `<div class="yst2-empty"><div class="symbol">▤</div><h3>Your series library is empty</h3><p>Open a YouTube playlist and select <b>Sync full playlist</b>, or play a video and use <b>Add current video</b> to start a series manually.</p></div>`;
-    if (activeTab === 'continue') body = allCont.length ? allCont.map(({s,e})=>`<section class="yst2-series"><div class="yst2-muted">${esc(s.title)}</div>${episodeHTML(s,e)}<button class="yst2-continue" data-continue="${esc(s.id)}">▶ Resume / play next</button></section>`).join('') :
-      `<div class="yst2-empty"><h3>Nothing to continue</h3><p>Start watching a series episode and progress will appear here.</p></div>`;
+      `<div class="yst2-empty"><div class="yst2-empty-art"><span>▶</span></div><h3>Your library starts here</h3><p>Collect playlists or add individual videos to build a personal watchlist. Your progress stays in this browser.</p><div class="yst2-empty-actions"><button id="yst2-empty-add" class="yst2-mainbtn">＋ Add current video</button><button id="yst2-empty-sync" class="yst2-subbtn">Sync a playlist</button></div></div>`;
+    if (activeTab === 'continue') body = allCont.length ? allCont.map(({s,e})=>
+      `<section class="yst2-series yst2-filter-item"><div class="yst2-continue-series-title">${esc(s.title)}</div>${episodeHTML(s,e)}<button class="yst2-continue" data-continue="${esc(s.id)}"><span class="yst2-continue-icon">▶</span><span class="yst2-continue-copy"><strong>Resume episode</strong><small>${esc(e.title)}</small></span><span class="yst2-continue-arrow">↗</span></button></section>`).join('') :
+      `<div class="yst2-empty"><div class="yst2-empty-art"><span>Ⅱ</span></div><h3>All caught up?</h3><p>When you start an episode, your in-progress videos will show up here for quick resuming.</p></div>`;
     if (activeTab === 'history') body = renderHistory();
     if (activeTab === 'settings') body = settingsHTML();
-    p.innerHTML = `<div class="yst2-top"><div><div class="yst2-logo">Series</div><div class="yst2-muted">${db.series.length} series · ${watched}/${total} episodes watched</div></div><button id="yst2-close" class="yst2-icon">×</button></div>
-      <div class="yst2-actions"><button id="yst2-add-current" class="yst2-mainbtn">＋ Add current video</button><button id="yst2-sync" class="yst2-subbtn">Sync full playlist</button><button id="yst2-export" class="yst2-subbtn">Export</button><button id="yst2-import" class="yst2-subbtn">Import</button></div>
-      <nav class="yst2-tabs">${[['library','Library'],['continue','Continue'],['history','History'],['settings','Settings']].map(([k,v])=>`<button data-tab="${k}" class="${activeTab===k?'active':''}">${v}</button>`).join('')}</nav>
-      <div class="yst2-content">${body}</div><footer class="yst2-footer">Local-only tracker · ${db.lastSync?`Last playlist sync ${new Date(db.lastSync).toLocaleString()}`:'No playlist sync yet'}</footer>`;
+    const tabs = [
+      ['library','Library',db.series.length],
+      ['continue','Continue',allCont.length],
+      ['history','History',historyCount],
+      ['settings','Settings',null]
+    ];
+    p.innerHTML = `<header class="yst2-top">
+        <div class="yst2-brand-row"><div class="yst2-brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M23.5 6.2a3 3 0 0 0-2.1-2.1C19.5 3.6 12 3.6 12 3.6s-7.5 0-9.4.5A3 3 0 0 0 .5 6.2C0 8.1 0 12 0 12s0 3.9.5 5.8a3 3 0 0 0 2.1 2.1c1.9.5 9.4.5 9.4.5s7.5 0 9.4-.5a3 3 0 0 0 2.1-2.1C24 15.9 24 12 24 12s0-3.9-.5-5.8ZM9.6 15.6V8.4L15.9 12l-6.3 3.6Z"/></svg></div>
+          <div><div class="yst2-logo">Series Tracker</div><div class="yst2-tagline">Your YouTube, in order.</div></div></div>
+        <button id="yst2-close" class="yst2-icon yst2-close" aria-label="Close tracker" title="Close">×</button>
+      </header>
+      <section id="yst2-dashboard" class="yst2-dashboard" aria-label="Your tracking overview">
+        <div class="yst2-metric"><span>Series</span><strong>${db.series.length}</strong></div>
+        <div class="yst2-metric"><span>Episodes</span><strong>${total}</strong></div>
+        <div class="yst2-metric"><span>Watched</span><strong>${pct}<small>%</small></strong></div>
+        <div class="yst2-overall-progress"><div class="yst2-overall-label"><span>Overall progress</span><span>${watched} of ${total}</span></div><div class="yst2-bar big" role="progressbar" aria-label="Overall progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><i style="width:${pct}%"></i></div></div>
+      </section>
+      <section class="yst2-toolbar" aria-label="Tracker actions">
+        <div class="yst2-primary-actions"><button id="yst2-add-current" class="yst2-mainbtn"><span aria-hidden="true">＋</span> Add video</button><button id="yst2-sync" class="yst2-subbtn"><span aria-hidden="true">↻</span> Sync playlist</button></div>
+        <div class="yst2-data-actions"><button id="yst2-export" class="yst2-icon" title="Export backup" aria-label="Export backup">⇩</button><button id="yst2-import" class="yst2-icon" title="Import backup" aria-label="Import backup">⇧</button></div>
+      </section>
+      <nav class="yst2-tabs" role="tablist" aria-label="Tracker sections">${tabs.map(([k,v,count])=>`<button role="tab" data-tab="${k}" aria-selected="${activeTab===k?'true':'false'}" class="${activeTab===k?'active':''}"><span>${v}</span>${count===null?'':`<span class="yst2-tab-count">${count}</span>`}</button>`).join('')}</nav>
+      ${activeTab === 'settings' ? '' : `<div class="yst2-searchwrap"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"></circle><path d="m16 16 5 5"></path></svg><input id="yst2-search" type="search" value="${esc(librarySearch)}" placeholder="${activeTab==='history'?'Search history matches':'Search series and episodes'}" aria-label="Search ${activeTab==='history'?'history matches':'series and episodes'}"><kbd>⌕</kbd></div>`}
+      <div id="yst2-search-empty" class="yst2-search-empty" hidden>No matches. Try another title.</div>
+      <div class="yst2-content">${body}</div>
+      <footer class="yst2-footer"><span class="yst2-privacy"><span></span> Stored locally in this browser</span><span>${db.lastSync?`Synced ${new Date(db.lastSync).toLocaleDateString()}`:'Not synced yet'}</span></footer>`;
     bindPanel();
   }
   function settingsHTML() {
@@ -497,11 +532,29 @@
   function renderHistory() {
     const rows = Object.entries(db.history).sort((a,b)=>(b[1].lastSeen||0)-(a[1].lastSeen||0)).slice(0,100);
     if (!rows.length) return `<div class="yst2-empty"><h3>No history matches yet</h3><p>Open YouTube History while logged in; the tracker will match visible videos against your saved series.</p><button id="yst2-scanhistory" class="yst2-mainbtn">Scan current History page</button></div>`;
-    return `<section class="yst2-series"><h3>History matches</h3><div class="yst2-muted">${rows.length} recently seen tracked episodes</div>${rows.map(([id,h])=>`<article class="yst2-ep"><img class="yst2-thumb" src="https://i.ytimg.com/vi/${esc(id)}/hqdefault.jpg"><div class="yst2-epbody"><button class="yst2-epname" data-history-play="${esc(id)}">${esc(h.title||stateFor(id).title||id)}</button><div class="yst2-muted">Seen ${new Date(h.lastSeen||Date.now()).toLocaleDateString()}</div></div></article>`).join('')}</section>`;
+    return `<section class="yst2-series"><div class="yst2-history-heading"><div><h3>History matches</h3><div class="yst2-muted">${rows.length} tracked videos found in your history</div></div><button id="yst2-scanhistory" class="yst2-subbtn">↻ Scan again</button></div>${rows.map(([id,h])=>`<article class="yst2-ep yst2-filter-item yst2-history-row"><img class="yst2-thumb" loading="lazy" alt="" src="https://i.ytimg.com/vi/${esc(id)}/hqdefault.jpg"><div class="yst2-epbody"><button class="yst2-epname" data-history-play="${esc(id)}">${esc(h.title||stateFor(id).title||id)}</button><div class="yst2-muted">Seen ${new Date(h.lastSeen||Date.now()).toLocaleDateString()}</div></div><span class="yst2-history-play" aria-hidden="true">↗</span></article>`).join('')}</section>`;
   }
   function bindPanel() {
     const p = document.getElementById(PANEL);
     p.querySelector('#yst2-close')?.addEventListener('click', closePanel);
+    p.querySelector('#yst2-empty-add')?.addEventListener('click', showAddVideoDialog);
+    p.querySelector('#yst2-empty-sync')?.addEventListener('click', syncCurrentPlaylist);
+    const search = p.querySelector('#yst2-search');
+    const applySearch = () => {
+      if (!search) return;
+      librarySearch = search.value;
+      const query = librarySearch.trim().toLocaleLowerCase();
+      let visible = 0;
+      p.querySelectorAll('.yst2-filter-item').forEach(item => {
+        const show = !query || item.textContent.toLocaleLowerCase().includes(query);
+        item.hidden = !show;
+        if (show) visible++;
+      });
+      const empty = p.querySelector('#yst2-search-empty');
+      if (empty) empty.hidden = !query || visible > 0;
+    };
+    search?.addEventListener('input', applySearch);
+    applySearch();
     p.querySelector('#yst2-add-current')?.addEventListener('click', showAddVideoDialog);
     p.querySelector('#yst2-sync')?.addEventListener('click', syncCurrentPlaylist);
     p.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>{activeTab=b.dataset.tab;renderPanel();if(activeTab==='history')scanHistoryPage();}));
@@ -684,6 +737,59 @@
       #${PLAYER_BTN}:focus-visible{outline:2px solid #fff;outline-offset:-4px;border-radius:8px}
       #yst2-toast{position:fixed;z-index:1000001;left:50%;bottom:26px;transform:translate(-50%,15px);opacity:0;pointer-events:none;background:#292a31;color:white;padding:12px 16px;border-radius:10px;box-shadow:0 5px 25px #0008;transition:.2s;font:13px Roboto,Arial,sans-serif;max-width:90vw}
       #yst2-toast.show{opacity:1;transform:translate(-50%,0)}@media(max-width:600px){#${PANEL}{top:6px;right:6px;bottom:6px;width:calc(100vw - 12px)}.yst2-thumb{width:72px}}
+      /* Series Tracker UI refresh */
+      #${PANEL}{width:min(510px,calc(100vw - 24px));background:linear-gradient(160deg,#17191f 0%,#101116 56%);border-color:#353945;box-shadow:0 24px 90px #000b;font-size:13px;color:#f3f4f8}
+      .yst2-top{padding:18px 18px 15px;border-bottom:1px solid #2a2d35;background:#15161c}
+      .yst2-brand-row{display:flex;align-items:center;gap:11px;min-width:0}.yst2-brand-mark{width:38px;height:38px;border-radius:12px;background:linear-gradient(145deg,#ff254b,#d90032);display:grid;place-items:center;box-shadow:0 5px 18px #ff174426;flex:none}
+      .yst2-brand-mark svg{width:19px;height:19px;fill:#fff}.yst2-logo{font-size:18px;line-height:1.2;font-weight:800;letter-spacing:-.45px}.yst2-tagline{margin-top:4px;color:#9094a2;font-size:11px;letter-spacing:.1px}
+      .yst2-close{width:34px;height:34px;border:1px solid #343742;padding:0;border-radius:11px;font-size:21px;color:#b4b8c3;background:#20222a;line-height:1}
+      .yst2-dashboard{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;padding:13px 16px 10px;background:#15161c}
+      .yst2-metric{display:flex;flex-direction:column;gap:5px;border:1px solid #2a2d36;background:#1b1d25;border-radius:12px;padding:10px 12px;min-width:0}
+      .yst2-metric>span{font-size:10px;text-transform:uppercase;letter-spacing:.9px;color:#969baa;font-weight:700}.yst2-metric>strong{font-size:23px;line-height:1.15;font-weight:800;letter-spacing:-.7px;color:#f5f6f9}.yst2-metric strong small{font-size:13px;color:#aeb2be;margin-left:1px}
+      .yst2-overall-progress{grid-column:1/-1;border:1px solid #2a2d36;background:#1b1d25;border-radius:12px;padding:10px 12px}
+      .yst2-overall-label{display:flex;justify-content:space-between;gap:10px;font-size:10px;color:#b0b4c0}.yst2-overall-label span:last-child{font-variant-numeric:tabular-nums}
+      .yst2-bar{height:5px;background:#323540;margin:9px 0 2px}.yst2-bar i{background:linear-gradient(90deg,#ff3158,#ff6377);transition:width .22s ease}.yst2-bar.big{height:5px}
+      .yst2-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 16px 13px;background:#15161c}
+      .yst2-primary-actions,.yst2-data-actions{display:flex;align-items:center;gap:7px;min-width:0}.yst2-mainbtn,.yst2-subbtn,.yst2-icon{border-radius:10px;transition:background .15s ease,border-color .15s ease,transform .15s ease}
+      .yst2-mainbtn{background:linear-gradient(135deg,#ff3158,#ec1740);box-shadow:0 4px 14px #ff174420;color:#fff;padding:10px 13px;font-weight:750}.yst2-mainbtn:hover{background:linear-gradient(135deg,#ff4c6d,#ff1744);transform:translateY(-1px)}
+      .yst2-subbtn{border:1px solid #363945;background:#22242d;color:#e3e5ed;padding:9px 12px}.yst2-subbtn:hover,.yst2-icon:hover{background:#2b2e39;border-color:#4b5060}
+      .yst2-data-actions .yst2-icon{width:35px;height:35px;border:1px solid #353843;padding:0;font-size:17px;color:#c9cbd5}
+      .yst2-tabs{gap:4px;padding:0 16px 11px;border-bottom:1px solid #2a2d35;background:#15161c}
+      .yst2-tabs button{display:flex;align-items:center;justify-content:center;gap:7px;flex:1;min-width:0;border:1px solid transparent;border-radius:10px;padding:9px 8px;background:transparent;color:#9499a8;font-size:11px;font-weight:650;white-space:nowrap}
+      .yst2-tabs button:hover{color:#e8eaf0;background:#1d1f27}.yst2-tabs button.active{background:#29212a;border-color:#55303b;color:#fff}
+      .yst2-tab-count{display:inline-grid;place-items:center;min-width:18px;height:18px;padding:0 5px;border-radius:6px;background:#30323c;color:#bfc3d0;font-size:10px;font-variant-numeric:tabular-nums}
+      .yst2-tabs button.active .yst2-tab-count{background:#64293b;color:#ffdce3}
+      .yst2-searchwrap{display:flex;align-items:center;gap:9px;margin:13px 16px 2px;padding:0 11px;height:39px;border:1px solid #30333d;border-radius:11px;background:#191b22;color:#8f94a3}
+      .yst2-searchwrap:focus-within{border-color:#aa435b;box-shadow:0 0 0 3px #ff315815}
+      .yst2-searchwrap svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;flex:none}
+      .yst2-searchwrap input{width:100%;min-width:0;border:0;outline:0;background:transparent;color:#f5f6f8;font:12px Roboto,Arial,sans-serif}
+      .yst2-searchwrap input::placeholder{color:#737988}.yst2-searchwrap kbd{border:1px solid #383b46;border-radius:5px;padding:1px 5px;font:10px Roboto,Arial,sans-serif;color:#7e8493}
+      .yst2-search-empty{margin:12px 16px 0;padding:11px;border:1px dashed #3b3e49;border-radius:10px;text-align:center;color:#aeb2bf;font-size:11px}.yst2-search-empty[hidden]{display:none}
+      .yst2-content{padding:13px 16px 18px;scrollbar-width:thin;scrollbar-color:#414450 transparent}.yst2-series{background:linear-gradient(145deg,#1b1d25,#171920);border:1px solid #30333e;border-radius:15px;padding:13px;margin-bottom:11px;box-shadow:0 4px 13px #00000012}
+      .yst2-series-overview{display:flex;align-items:flex-start;gap:12px}.yst2-series-art{position:relative;width:108px;min-width:108px;aspect-ratio:16/11;display:grid;place-items:center;overflow:hidden;border-radius:10px;border:1px solid #393c47;background:linear-gradient(145deg,#292c36,#1b1d25)}
+      .yst2-series-art img{width:100%;height:100%;position:absolute;inset:0;object-fit:cover}.yst2-series-art:after{content:"";position:absolute;inset:45% 0 0;background:linear-gradient(transparent,#090a0dcc);pointer-events:none}
+      .yst2-series-art>span{position:absolute;bottom:6px;left:7px;z-index:1;padding:3px 6px;border-radius:5px;background:#0d0e12d9;color:#fff;font-size:9px;font-weight:700}
+      .yst2-series-art-placeholder{font-size:24px;color:#ff536f}.yst2-series-info{flex:1;min-width:0}
+      .yst2-serieshead{gap:4px;margin-bottom:7px}.yst2-seriestitle{font-size:14px;line-height:1.35;font-weight:750;letter-spacing:-.15px}
+      .yst2-serieshead .yst2-icon{width:27px;height:27px;flex:none;padding:0;border:1px solid #353843;color:#b5bac8;font-size:15px;line-height:1}
+      .yst2-serieshead .yst2-icon.danger{color:#f18b9e}.yst2-muted{color:#999eac;font-size:10px;line-height:1.5}.yst2-dot{padding:0 3px;color:#666b79}
+      .yst2-series-footline{display:flex;align-items:center;justify-content:space-between;gap:7px;font-size:10px;color:#8e94a3}.yst2-progress-label{color:#ffc0cb;font-weight:700}
+      .yst2-continue{display:flex;align-items:center;gap:10px;margin-top:10px;padding:9px 10px;border:1px solid #4c2936;background:#2b1b26;color:#fff;border-radius:10px;text-align:left;white-space:normal;overflow:visible;text-overflow:clip}
+      .yst2-continue:hover{border-color:#8f3b53;background:#35202c}.yst2-continue-icon{display:grid;place-items:center;width:29px;height:29px;flex:none;border-radius:9px;background:#8c263f;color:#fff;font-size:11px}
+      .yst2-continue-copy{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1}.yst2-continue-copy strong{font-size:11px;font-weight:750}.yst2-continue-copy small{font-size:10px;font-weight:400;color:#e5a6b5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .yst2-continue-arrow{color:#e89bad;font-size:15px}.yst2-done{padding:9px 0 0;color:#78d9ac;font-size:11px}
+      .yst2-details{margin-top:11px;border-top:1px solid #2c2f38;padding-top:7px}.yst2-details summary{display:flex;align-items:center;gap:7px;list-style:none;padding:5px 1px;color:#d2d5df;font-size:11px;font-weight:700}.yst2-details summary::-webkit-details-marker{display:none}
+      .yst2-summary-count{display:inline-grid;place-items:center;min-width:18px;height:18px;padding:0 5px;border-radius:6px;background:#292c36;color:#aeb4c3;font-size:9px}.yst2-summary-spacer{flex:1}.yst2-summary-hint{font-size:9px;font-weight:500;color:#838998}.yst2-chevron{font-size:16px;color:#838998;transition:transform .15s ease}.yst2-details[open] .yst2-chevron{transform:rotate(180deg)}
+      .yst2-ep{gap:9px;border-bottom-color:#2a2d36;padding:10px 0}.yst2-thumb{width:82px;border:1px solid #343743;border-radius:8px}.yst2-epname{font-size:11px;line-height:1.45;color:#f0f1f5;max-height:3em}.yst2-epname:hover{color:#ffb6c4}.yst2-epbody .yst2-bar{height:3px;margin-top:6px}.yst2-mark{width:30px;height:30px;min-width:30px;border-radius:9px;color:#9ca2b1;font-size:17px}.yst2-mark:hover{background:#292c35}.yst2-mark.checked{color:#72ddb0;background:#20352f}.yst2-ep.is-watched .yst2-epname{color:#b2b6c2}
+      .yst2-manual-label{margin-left:auto;padding:4px 6px;border-radius:6px;background:#282a34;color:#aeb4c2;font-size:9px;white-space:nowrap}
+      .yst2-empty{text-align:center;padding:34px 18px;color:#e2e4eb;border:1px dashed #353843;border-radius:15px;background:#181a21}.yst2-empty-art{width:56px;height:56px;margin:0 auto 13px;display:grid;place-items:center;border-radius:17px;background:#34202a;color:#ff6a85;font-size:25px;font-weight:800}.yst2-empty h3{font-size:15px;font-weight:750;letter-spacing:-.2px;margin:0 0 7px}.yst2-empty p{max-width:310px;margin:0 auto 15px;color:#999eac;font-size:11px;line-height:1.7}.yst2-empty-actions{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}.yst2-empty-actions button{width:auto!important;margin:0!important}
+      .yst2-setting{align-items:flex-start;line-height:1.5;font-size:11px;color:#d5d8e1}.yst2-setting input{margin-top:2px}.yst2-setting select{margin-top:-4px}.yst2-series h3{font-size:13px;margin:2px 0 12px;font-weight:750}.yst2-footer{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:11px 16px;background:#15161c;border-top:1px solid #2a2d35;color:#787e8c;font-size:9px}
+      .yst2-privacy{display:flex;align-items:center;gap:6px}.yst2-privacy span{width:6px;height:6px;display:inline-block;border-radius:50%;background:#66d9a8;box-shadow:0 0 0 3px #66d9a818}
+      .yst2-history-heading{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px}.yst2-history-heading h3{margin:0 0 3px;font-size:13px}.yst2-history-heading .yst2-subbtn{font-size:10px;padding:7px 9px;white-space:nowrap}.yst2-history-play{color:#858b9b;font-size:15px}
+      #${PANEL} button:focus-visible,#${PANEL} input:focus-visible,#${PANEL} select:focus-visible{outline:2px solid #ff6682;outline-offset:2px}
+      #${PANEL} [hidden]{display:none!important}
+      @media(max-width:600px){.yst2-dashboard{padding:10px 10px 8px;gap:6px}.yst2-metric{padding:9px}.yst2-toolbar{padding:10px;align-items:stretch}.yst2-primary-actions{flex:1}.yst2-primary-actions button{flex:1;padding:9px 7px}.yst2-data-actions{align-items:stretch}.yst2-tabs{padding:0 10px 9px}.yst2-tabs button{padding:8px 4px;gap:4px}.yst2-content{padding:10px}.yst2-series{padding:10px}.yst2-series-art{width:83px;min-width:83px;aspect-ratio:1/1}.yst2-serieshead .yst2-icon{width:24px;height:24px}.yst2-seriestitle{font-size:12px}.yst2-continue{gap:7px;padding:8px}.yst2-continue-copy strong{font-size:10px}.yst2-continue-copy small{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}.yst2-footer{padding:9px 10px}.yst2-searchwrap{margin-left:10px;margin-right:10px}}
+      @media(prefers-reduced-motion:reduce){#${PANEL} *,#${PANEL} *:before,#${PANEL} *:after{transition:none!important;scroll-behavior:auto!important}}
     `;document.head.appendChild(st);
   }
   function trackCurrentVideo() {

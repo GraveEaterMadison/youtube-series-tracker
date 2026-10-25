@@ -15,6 +15,8 @@ A local-first Firefox userscript for tracking YouTube playlists as series: episo
 - Leave the new-series name blank to automatically use a unique default such as **New Series**, **New Series 2**, and so on.
 - Create a local series library from YouTube playlists or add videos one by one to a manual series.
 - Track playback positions and watched episodes.
+- Search the series library, continue-watching list, and tracked History matches.
+- View cover artwork and progress summaries in the refreshed tracker panel.
 - Configure the auto-mark-watched threshold.
 - Optional auto-next navigation.
 - Refresh playlists and manually toggle watched status.
