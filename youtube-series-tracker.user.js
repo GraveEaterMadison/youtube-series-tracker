@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Series Tracker
 // @namespace    https://github.com/GraveEaterMadison/youtube-series-tracker
-// @version      2.3.0
+// @version      2.4.0
 // @description  Build YouTube series from playlists or add individual videos, with automatic default series names, local progress, watched status, history matching, and optional auto-next.
 // @author       Zero
 // @license      MIT
