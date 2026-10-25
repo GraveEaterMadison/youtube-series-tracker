@@ -1226,7 +1226,7 @@
     }
     if (listId) {
       const already = findSeries(listId);
-      if (already) {
+      if (already && already.episodes.some(episode => episode.id === videoId && episode.available !== false && !episode.unavailable)) {
         showSeriesInLibrary(already);
         toast('Already following "' + already.title + '".');
         return;
@@ -1435,10 +1435,10 @@
     // Detach the previous episode's closures before attaching handlers for the new episode.
     if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;}
     currentVideoId=meta.id;activeVideo=video;
-    const list=getPlaylistId(), s=list?findSeries(list):db.series.find(x=>x.episodes.some(e=>e.id===meta.id));
-    if(s&&!s.episodes.some(e=>e.id===meta.id)){
-      s.episodes.push({id:meta.id,title:meta.title,duration:meta.duration,thumb:meta.thumb,url:meta.url,order:s.episodes.length});saveDB();
-    }
+    const list=getPlaylistId();
+    const listSeries=list?findSeries(list):undefined;
+    const inListedSeries=Boolean(listSeries && listSeries.episodes.some(e=>e.id===meta.id && e.available!==false && !e.unavailable));
+    const s=inListedSeries?listSeries:db.series.find(x=>x.episodes.some(e=>e.id===meta.id && e.available!==false && !e.unavailable));
     const savePosition=()=>{
       if(!Number.isFinite(video.currentTime))return;
       const dur=Number.isFinite(video.duration)?video.duration:meta.duration;
