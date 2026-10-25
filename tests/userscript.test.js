@@ -112,9 +112,11 @@ test('readme describes beta status and local storage limitations', () => {
 
 test('auto-next never repeats an already-watched episode when no unwatched episode follows', () => {
   const watched = new Set(['current', 'later-watched', 'last-watched']);
+  const orderedEpisodes = vm.runInNewContext(`(${extractSimpleFunction(source, 'orderedEpisodes')})`);
   const chooseNext = vm.runInNewContext(`(${extractSimpleFunction(source, 'chooseNext')})`, {
     stateFor: id => ({ watched: watched.has(id) }),
-    chooseContinue: () => ({ id: 'continue-fallback' })
+    chooseContinue: () => ({ id: 'continue-fallback' }),
+    orderedEpisodes
   });
   const series = { episodes: [
     { id: 'current', order: 0 },
@@ -126,9 +128,11 @@ test('auto-next never repeats an already-watched episode when no unwatched episo
 
 test('auto-next selects the next unwatched episode in playlist order', () => {
   const watched = new Set(['current', 'watched-middle']);
+  const orderedEpisodes = vm.runInNewContext(`(${extractSimpleFunction(source, 'orderedEpisodes')})`);
   const chooseNext = vm.runInNewContext(`(${extractSimpleFunction(source, 'chooseNext')})`, {
     stateFor: id => ({ watched: watched.has(id) }),
-    chooseContinue: () => null
+    chooseContinue: () => null,
+    orderedEpisodes
   });
   const series = { episodes: [
     { id: 'current', order: 0 },
