@@ -373,3 +373,26 @@ test('current playlist indexes are normalized from YouTube one-based index URLs'
   assert.equal(currentPlaylistIndex('https://www.youtube.com/watch?v=aaaaaaaaaaa&list=PLabcdefghijk&index=4'), 3);
   assert.equal(currentPlaylistIndex('https://www.youtube.com/watch?v=aaaaaaaaaaa'), -1);
 });
+
+
+test('direct playlist following has a readable series-name fallback when YouTube omits playlist metadata', () => {
+  assert.match(source, /title: catalog\.title \|\| playlistTitleFromDOM\(\) \|\| seriesSearchTitle\(currentVideoDetails\(capturedVideo\)\.title\)/);
+});
+
+test('resume cursor and auto-next match the active YouTube playlist index', () => {
+  assert.match(source, /function currentPlaylistIndex\(url\)/);
+  assert.match(source, /function episodeOccurrence\(series, videoId, requestedOrder\)/);
+  assert.match(source, /const listOrder=listSeries\?currentPlaylistIndex\(\):-1/);
+  assert.match(source, /chooseNext\(s,meta\.id,currentOccurrence&&currentOccurrence\.order\)/);
+  assert.match(source, /series\.cursorOrder = episode\.order/);
+});
+
+test('discovery inspects the channel Playlists tab before falling back to general YouTube search', () => {
+  const discovery = source.slice(source.indexOf('async function discoverPlaylistsForVideo'), source.indexOf('function showSeriesInLibrary'));
+  const descriptionStage = discovery.indexOf('for (const id of linked)');
+  const channelStage = discovery.indexOf('channelPlaylistCandidates(details, budget)');
+  const searchStage = discovery.indexOf("const seriesTitle = seriesSearchTitle(details.title)");
+  assert.ok(descriptionStage >= 0 && channelStage > descriptionStage && searchStage > channelStage);
+  assert.match(source, /async function channelPlaylistCandidates\(details, budget\)/);
+  assert.match(source, /LOCKUP_CONTENT_TYPE_PLAYLIST/);
+});
