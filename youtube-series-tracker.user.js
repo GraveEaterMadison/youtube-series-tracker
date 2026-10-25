@@ -555,17 +555,27 @@
   }
 
   function currentVideoDetails(videoId) {
-    const details = window.ytInitialPlayerResponse && window.ytInitialPlayerResponse.videoDetails;
+    let playerResponse = null;
+    try {
+      const player = document.getElementById('movie_player');
+      playerResponse = player && typeof player.getPlayerResponse === 'function' ? player.getPlayerResponse() : null;
+    } catch (_) {}
+    const initial = window.ytInitialPlayerResponse;
+    const details = playerResponse && playerResponse.videoDetails
+      || initial && initial.videoDetails;
     if (details && details.videoId === videoId) {
+      const descriptionNode = document.querySelector('#description-inline-expander #content, ytd-text-inline-expander #content-text, #description ytd-text-inline-expander');
+      const descriptionLinks = descriptionNode ? [...descriptionNode.querySelectorAll('a[href]')].map(a => a.href).join(' ') : '';
       return {
         id: videoId,
         title: String(details.title || videoTitle()),
         author: String(details.author || ''),
         channelId: String(details.channelId || ''),
-        description: String(details.shortDescription || '')
+        description: String(details.shortDescription || '') + ' ' + descriptionLinks
       };
     }
     const channel = document.querySelector('ytd-video-owner-renderer a[href*="/channel/"], #owner #channel-name a');
+    const descriptionNode = document.querySelector('#description-inline-expander #content, ytd-text-inline-expander #content-text, #description ytd-text-inline-expander');
     let channelId = '';
     try {
       if (channel && channel.href) {
@@ -573,15 +583,16 @@
         channelId = url.pathname.split('/channel/')[1]?.split(/[/?#]/)[0] || '';
       }
     } catch (_) {}
+    const descriptionText = descriptionNode ? text(descriptionNode) : '';
+    const descriptionLinks = descriptionNode ? [...descriptionNode.querySelectorAll('a[href]')].map(a => a.href).join(' ') : '';
     return {
       id: videoId,
       title: videoTitle(),
       author: text(channel),
       channelId,
-      description: ''
+      description: (descriptionText + ' ' + descriptionLinks).slice(0, 20000)
     };
   }
-
   function normalizeSearchTokens(value) {
     return String(value || '').toLocaleLowerCase().split(/[^\p{L}\p{N}]+/u).filter(word => word.length > 2);
   }
@@ -933,22 +944,57 @@
     const d = st.duration || e.duration || 0;
     return d ? Math.max(0, Math.min(99, st.position / d * 100)) : 0;
   }
+  function currentPlaylistIndex(url) {
+    try {
+      const value = new URL(url || location.href, location.origin).searchParams.get('index');
+      const index = Number(value);
+      return Number.isInteger(index) && index > 0 ? index - 1 : -1;
+    } catch (_) {
+      return -1;
+    }
+  }
+
+  function episodeOccurrence(series, videoId, requestedOrder) {
+    const episodes = (series && series.episodes || []).filter(e =>
+      e && e.id === videoId && e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
+    if (Number.isInteger(requestedOrder) && requestedOrder >= 0) {
+      const exact = episodes.find(e => e.order === requestedOrder);
+      if (exact) return exact;
+    }
+    return episodes[0] || null;
+  }
   function chooseContinue(s) {
     const eps = orderedEpisodes(s).filter(e =>
       e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
+    const cursorIndex = s && s.cursorVideoId
+      ? eps.findIndex(e => e.id === s.cursorVideoId && (!Number.isInteger(s.cursorOrder) || e.order === s.cursorOrder))
+      : -1;
+    if (cursorIndex >= 0) {
+      const cursor = eps[cursorIndex];
+      if (!stateFor(cursor.id).watched) return cursor;
+      const afterCursor = eps.slice(cursorIndex + 1).find(e => !stateFor(e.id).watched);
+      if (afterCursor) return afterCursor;
+    }
     return eps.find(e => !stateFor(e.id).watched && stateFor(e.id).position > 5) ||
       eps.find(e => !stateFor(e.id).watched) || null;
   }
-  function chooseNext(s, id) {
+  function chooseNext(s, id, requestedOrder) {
     const eps = orderedEpisodes(s).filter(e =>
       e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
-    const idx = eps.findIndex(e => e.id === id);
+    let idx = Number.isInteger(requestedOrder)
+      ? eps.findIndex(e => e.id === id && e.order === requestedOrder)
+      : -1;
+    if (idx < 0) idx = eps.findIndex(e => e.id === id);
     if (idx >= 0) return eps.slice(idx + 1).find(e => !stateFor(e.id).watched) || null;
     return chooseContinue(s);
   }
   function openEpisode(s, e, resume = true) {
     if (!s || !e || e.unavailable || e.available === false || !/^[A-Za-z0-9_-]{11}$/.test(e.id)) return;
     const st = stateFor(e.id);
+    s.cursorVideoId = e.id;
+    s.cursorOrder = Number.isInteger(e.order) ? e.order : undefined;
+    s.cursorUpdatedAt = Date.now();
+    saveDB();
     location.href = urlFor(e.id, s.playlistId, s.playlistId ? e.order : undefined, resume && !st.watched ? st.position : 0);
   }
   function markEpisode(id, watched) {
@@ -1318,15 +1364,14 @@
   }
 
   function recordCurrentProgressInSeries(series, videoId) {
-    const episode = series.episodes.find(item =>
-      item.id === videoId && item.available !== false && !item.unavailable);
+    const requestedOrder = series && series.playlistId && getPlaylistId() === series.playlistId
+      ? currentPlaylistIndex() : -1;
+    const episode = episodeOccurrence(series, videoId, requestedOrder);
     if (!episode) return;
     const video = document.querySelector('video');
     const old = stateFor(videoId);
-    const duration = Number.isFinite(video && video.duration) && video.duration > 0
-      ? video.duration : episode.duration || old.duration || 0;
-    const position = Number.isFinite(video && video.currentTime) && video.currentTime > 0
-      ? video.currentTime : old.position || 0;
+    const duration = Number.isFinite(video && video.duration) && video.duration > 0 ? video.duration : episode.duration || old.duration || 0;
+    const position = Number.isFinite(video && video.currentTime) && video.currentTime > 0 ? video.currentTime : old.position || 0;
     const threshold = Number(db.settings.watchedThreshold);
     const watched = old.watched || (duration > 0 && (Boolean(video && video.ended) || (threshold < 1 && position / duration >= threshold)));
     setState(videoId, {
@@ -1335,9 +1380,11 @@
       duration: duration || old.duration,
       watched
     }, false);
+    series.cursorVideoId = videoId;
+    series.cursorOrder = episode.order;
+    series.cursorUpdatedAt = Date.now();
     db.history[videoId] = { title: episode.title || old.title, lastSeen: Date.now() };
   }
-
   function finishAutoFollow(candidate, videoId) {
     const series = mergeSeries(candidate.id, candidate.title || seriesSearchTitle(currentVideoDetails(videoId).title) || candidate.id, candidate.items);
     if (typeof series.playbackReverse !== 'boolean') {
@@ -1666,8 +1713,15 @@
     currentVideoId=meta.id;activeVideo=video;
     const list=getPlaylistId();
     const listSeries=list?findSeries(list):undefined;
-    const inListedSeries=Boolean(listSeries && listSeries.episodes.some(e=>e.id===meta.id && e.available!==false && !e.unavailable));
-    const s=inListedSeries?listSeries:db.series.find(x=>x.episodes.some(e=>e.id===meta.id && e.available!==false && !e.unavailable));
+    const listOrder=listSeries && listSeries.playlistId===list?currentPlaylistIndex():-1;
+    const listedOccurrence=listSeries?episodeOccurrence(listSeries,meta.id,listOrder):null;
+    const s=listedOccurrence?listSeries:db.series.find(x=>episodeOccurrence(x,meta.id,x.playlistId===list?listOrder:-1));
+    const currentOccurrence=s?episodeOccurrence(s,meta.id,s.playlistId===list?listOrder:-1):null;
+    if(s&&currentOccurrence){
+      s.cursorVideoId=meta.id;
+      s.cursorOrder=currentOccurrence.order;
+      s.cursorUpdatedAt=Date.now();
+    }
     const savePosition=()=>{
       if(!Number.isFinite(video.currentTime))return;
       const dur=Number.isFinite(video.duration)?video.duration:meta.duration;
@@ -1687,7 +1741,7 @@
       if(s) db.history[meta.id]={title:meta.title,lastSeen:Date.now()};
       saveDB();
       if(db.settings.autoNext && s) {
-        const next=chooseNext(s,meta.id);
+        const next=chooseNext(s,meta.id,currentOccurrence&&currentOccurrence.order);
         if(next && next.id!==meta.id) {
           toast(`Playing next episode: ${next.title}`);
           setTimeout(()=>{if(video.ended&&getVideoId()===meta.id)openEpisode(s,next,false);},900);
