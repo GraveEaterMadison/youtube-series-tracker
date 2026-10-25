@@ -459,27 +459,78 @@
     return (season ? Number(season[1]) : 0) * 10000 + Number(all[0][1]);
   }
 
+  function episodeAgeRange(metadata) {
+    const agePattern = /^(?:streamed |premiered )?(\d{1,6})\s+(second|minute|hour|day|week|month|year)s? ago$/i;
+    for (const part of String(metadata || '').split(/[•·]/)) {
+      const match = agePattern.exec(part.trim());
+      if (!match) continue;
+      const count = Number(match[1]);
+      const unit = match[2].toLowerCase();
+      let low, high;
+      switch (unit) {
+        case 'second': low = high = 1; break;
+        case 'minute': low = high = 60; break;
+        case 'hour': low = high = 3600; break;
+        case 'day': low = high = 86400; break;
+        case 'week': low = high = 604800; break;
+        case 'month': low = 28 * 86400; high = 31 * 86400; break;
+        default: low = 365 * 86400; high = 366 * 86400; break;
+      }
+      return [count * low, (count + 1) * high];
+    }
+    return null;
+  }
+
   function inferReverseOrder(items) {
-    const playable = (items || []).filter(item =>
-      item && item.available !== false && !item.unavailable && /^[A-Za-z0-9_-]{11}$/.test(item.id));
+    const playable = [];
+    const seen = new Set();
+    for (const item of items || []) {
+      if (!item || item.available === false || item.unavailable || !/^[A-Za-z0-9_-]{11}$/.test(item.id) || seen.has(item.id)) continue;
+      seen.add(item.id);
+      playable.push(item);
+    }
     if (playable.length < 2) return false;
-    const values = playable.map(item => episodeNumberFromTitle(item.title));
-    const recognized = values.filter(Number.isFinite);
-    if (recognized.length < 2 || recognized.length * 5 < playable.length * 3) return false;
-    let direction = 0;
-    let prior = null;
-    for (const value of values) {
-      if (!Number.isFinite(value)) continue;
-      if (prior !== null) {
-        const next = Math.sign(value - prior);
+
+    const numbered = playable.map(item => ({
+      number: episodeNumberFromTitle(item.title),
+      seasonal: /\b(?:season|series|saison)\s*0*\d{1,3}\b/i.test(item.title)
+    })).filter(item => Number.isFinite(item.number));
+    if (numbered.length >= 2 && numbered.length * 5 >= playable.length * 3) {
+      const seasonal = numbered[0].seasonal;
+      if (numbered.some(item => item.seasonal !== seasonal)) return false;
+      let direction = 0;
+      for (let i = 1; i < numbered.length; i++) {
+        const next = Math.sign(numbered[i].number - numbered[i - 1].number);
         if (!next || (direction && next !== direction)) return false;
         direction = next;
       }
-      prior = value;
+      return direction < 0;
     }
+
+    let dated = 0;
+    let votes = 0;
+    let direction = 0;
+    let earliestUpper = Number.MAX_SAFE_INTEGER;
+    let latestLower = Number.MIN_SAFE_INTEGER;
+    for (const item of playable) {
+      const age = episodeAgeRange(item.videoInfo);
+      if (!age) continue;
+      dated++;
+      const older = age[0] >= earliestUpper;
+      const newer = age[1] <= latestLower;
+      if (older && newer) return false;
+      const next = older ? -1 : newer ? 1 : 0;
+      if (next) {
+        if (direction && next !== direction) return false;
+        direction = next;
+        votes++;
+      }
+      earliestUpper = Math.min(earliestUpper, age[1]);
+      latestLower = Math.max(latestLower, age[0]);
+    }
+    if (dated < 3 || dated * 5 < playable.length * 3 || votes < 2) return false;
     return direction < 0;
   }
-
   function orderedEpisodes(series) {
     const episodes = [...(series && series.episodes || [])].sort((a,b) => a.order - b.order);
     return series && series.playbackReverse ? episodes.reverse() : episodes;
