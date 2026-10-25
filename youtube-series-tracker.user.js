@@ -453,9 +453,9 @@
       if (/\bS\d{1,3}[ ._-]*E\d{1,4}\b/i.test(value.slice(compact.index + compact[0].length))) return null;
       return Number(compact[1]) * 10000 + Number(compact[2]);
     }
-    const all = [...value.matchAll(/\b(?:episode|ep\.?|part|chapter)\s*#?\s*(\d{1,4})\b/gi)];
+    const all = [...value.matchAll(/\b(?:episode|épisode|ep\.?|part|chapter)\s*#?\s*(\d{1,4})\b/gi)];
     if (all.length !== 1) return null;
-    const season = /\b(?:season|series)\s*0*(\d{1,3})\b/i.exec(value);
+    const season = /\b(?:season|series|saison)\s*0*(\d{1,3})\b/i.exec(value);
     return (season ? Number(season[1]) : 0) * 10000 + Number(all[0][1]);
   }
 
