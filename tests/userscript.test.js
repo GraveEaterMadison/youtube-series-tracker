@@ -396,3 +396,32 @@ test('discovery inspects the channel Playlists tab before falling back to genera
   assert.match(source, /async function channelPlaylistCandidates\(details, budget\)/);
   assert.match(source, /LOCKUP_CONTENT_TYPE_PLAYLIST/);
 });
+
+
+test('series episode lists are lazy-rendered in bounded batches', () => {
+  const seriesCard = source.slice(source.indexOf('function seriesHTML(s)'), source.indexOf('function renderPanel()'));
+  assert.match(seriesCard, /data-episode-list=/);
+  assert.match(seriesCard, /data-load-more=/);
+  assert.doesNotMatch(seriesCard, /orderedEpisodes\(s\)\.map\(e=>episodeHTML\(s,e\)\)/);
+  assert.match(source, /const EPISODE_BATCH_SIZE = 50/);
+  assert.match(source, /function appendEpisodeBatch\(details, requestedTotal\)/);
+});
+
+test('lazy episode-list state and scroll position survive panel rerenders', () => {
+  assert.match(source, /const episodeUiState = new Map\(\)/);
+  assert.match(source, /loaded: list \? list\.children\.length : 0/);
+  assert.match(source, /scrollTop: list \? list\.scrollTop : 0/);
+  assert.match(source, /appendEpisodeBatch\(details, state\.loaded\)/);
+  assert.match(source, /if\(details\.open && details\.querySelector/);
+});
+
+test('episode search includes titles even when their rows have not been loaded into the DOM', () => {
+  assert.match(source, /\[series\.title, \.\.\.series\.episodes\.map\(ep => ep\.title \|\| ''\)\]/);
+  assert.match(source, /let haystack = item\.textContent\.toLocaleLowerCase\(\)/);
+});
+
+test('playback progress UI has its own throttle and does not reuse the save throttle', () => {
+  assert.match(source, /let lastPanelRender = 0/);
+  assert.match(source, /Date\.now\(\)-lastPanelRender>1800/);
+  assert.match(source, /lastPanelRender=Date\.now\(\);renderPanel\(\)/);
+});
