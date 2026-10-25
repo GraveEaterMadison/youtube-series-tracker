@@ -382,7 +382,7 @@ test('direct playlist following has a readable series-name fallback when YouTube
 test('resume cursor and auto-next match the active YouTube playlist index', () => {
   assert.match(source, /function currentPlaylistIndex\(url\)/);
   assert.match(source, /function episodeOccurrence\(series, videoId, requestedOrder\)/);
-  assert.match(source, /const listOrder=listSeries\?currentPlaylistIndex\(\):-1/);
+  assert.match(source, /const listOrder=listSeries && listSeries\.playlistId===list\?currentPlaylistIndex\(\):-1/);
   assert.match(source, /chooseNext\(s,meta\.id,currentOccurrence&&currentOccurrence\.order\)/);
   assert.match(source, /series\.cursorOrder = episode\.order/);
 });
