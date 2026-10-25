@@ -3,6 +3,8 @@
 ## 2.4.0
 
 - Make the player button automatically follow the current playlist and name the series from YouTube playlist metadata.
+- Lazy-render episode rows in 50-item batches, preserve expanded/loaded list state during panel refreshes, and keep episode-title search working before rows are rendered.
+- Use a separate throttle for live progress UI refreshes so saving playback position does not suppress dashboard updates.
 - If the watch URL has no usable playlist ID, discover candidate playlists from the video's description, the video's own channel Playlists tab, and YouTube search; verify each candidate contains the current video and show a chooser when results are ambiguous.
 - Replace page-wide renderer scanning with requested-playlist parsing and bounded, all-or-nothing continuation fetching. Existing saved episodes remain intact if YouTube returns incomplete or unsupported data.
 - Infer likely episode order from numbered titles or relative upload-age metadata, preserve original playlist indexes, and display unavailable rows without allowing them to be played or marked watched.
