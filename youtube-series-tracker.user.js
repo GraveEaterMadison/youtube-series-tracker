@@ -1045,31 +1045,234 @@
     host.appendChild(button);
   }
 
-  function openFromPlayer() {
-    const videoId = getVideoId();
-    const listId = getPlaylistId();
+  function showSeriesInLibrary(series) {
+    if (!series) return;
     activeTab = 'library';
+    librarySearch = '';
     openPanel();
-
-    // A playing video should offer the one-by-one builder first, even when its
-    // URL also contains list=. The dialog retains a separate whole-playlist action.
-    if (videoId) {
-      showAddVideoDialog();
-      return;
-    }
-
-    if (listId) {
-      const existing = findSeries(listId);
-      if (existing) {
-        toast('Series "' + existing.title + '" is already in your library.');
-        return;
-      }
-      syncCurrentPlaylist();
-      return;
-    }
-    toast('Open a YouTube video or playlist first.');
+    setTimeout(() => {
+      const panel = document.getElementById(PANEL);
+      const card = panel && [...panel.querySelectorAll('[data-series-card]')].find(node => node.dataset.seriesCard === series.id);
+      if (!card) return;
+      card.classList.add('yst2-series-highlight');
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setTimeout(() => card.classList.remove('yst2-series-highlight'), 2200);
+    }, 120);
   }
 
+  function seriesMatchesVideo(videoId) {
+    return db.series.filter(series => series.episodes.some(episode =>
+      episode.id === videoId && episode.available !== false && !episode.unavailable));
+  }
+
+  function recordCurrentProgressInSeries(series, videoId) {
+    const episode = series.episodes.find(item =>
+      item.id === videoId && item.available !== false && !item.unavailable);
+    if (!episode) return;
+    const video = document.querySelector('video');
+    const old = stateFor(videoId);
+    const duration = Number.isFinite(video && video.duration) && video.duration > 0
+      ? video.duration : episode.duration || old.duration || 0;
+    const position = Number.isFinite(video && video.currentTime) && video.currentTime > 0
+      ? video.currentTime : old.position || 0;
+    const threshold = Number(db.settings.watchedThreshold);
+    const watched = old.watched || (duration > 0 && (Boolean(video && video.ended) || (threshold < 1 && position / duration >= threshold)));
+    setState(videoId, {
+      title: episode.title || old.title,
+      position: watched ? (duration || position) : position,
+      duration: duration || old.duration,
+      watched
+    }, false);
+    db.history[videoId] = { title: episode.title || old.title, lastSeen: Date.now() };
+  }
+
+  function finishAutoFollow(candidate, videoId) {
+    const series = mergeSeries(candidate.id, candidate.title || seriesSearchTitle(currentVideoDetails(videoId).title) || candidate.id, candidate.items);
+    if (typeof series.playbackReverse !== 'boolean') {
+      series.playbackReverse = typeof candidate.reverse === 'boolean' ? candidate.reverse : inferReverseOrder(candidate.items);
+    }
+    recordCurrentProgressInSeries(series, videoId);
+    saveDB();
+    showSeriesInLibrary(series);
+    toast('Followed "' + series.title + '" · ' + series.episodes.length + ' episodes added.');
+    return series;
+  }
+
+  function showPlaylistCandidateDialog(videoId, candidates) {
+    activeTab = 'library';
+    librarySearch = '';
+    openPanel();
+    const panel = document.getElementById(PANEL);
+    if (!panel) return;
+    panel.querySelector('#yst2-auto-follow-chooser')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'yst2-auto-follow-chooser';
+    modal.className = 'yst2-modal-backdrop';
+    modal.innerHTML = '<section class="yst2-modal" role="dialog" aria-modal="true" aria-labelledby="yst2-auto-follow-title">'
+      + '<header class="yst2-modal-head"><div><h3 id="yst2-auto-follow-title">Choose the series playlist</h3>'
+      + '<p class="yst2-muted">These playlists were checked to ensure they contain the current video.</p></div>'
+      + '<button type="button" id="yst2-auto-follow-close" class="yst2-icon" aria-label="Close">×</button></header>'
+      + '<div class="yst2-candidate-list">' + candidates.map((candidate,index) =>
+        '<button type="button" class="yst2-candidate" data-follow-candidate="' + index + '">'
+          + (candidate.thumb ? '<img loading="lazy" alt="" src="' + esc(candidate.thumb) + '">' : '<span class="yst2-candidate-play">▶</span>')
+          + '<span class="yst2-candidate-copy"><strong>' + esc(candidate.title) + '</strong><small>'
+          + esc(candidate.owner || 'YouTube playlist') + ' · ' + candidate.items.length + ' episodes</small></span><span class="yst2-candidate-arrow">›</span></button>'
+      ).join('') + '</div>'
+      + '<button type="button" id="yst2-auto-follow-manual" class="yst2-subbtn">Add only this video manually</button>'
+      + '<button type="button" id="yst2-auto-follow-cancel" class="yst2-subbtn yst2-dialog-cancel">Cancel</button>'
+      + '</section>';
+    panel.appendChild(modal);
+    modal.querySelectorAll('[data-follow-candidate]').forEach(button => {
+      button.addEventListener('click', () => {
+        const candidate = candidates[Number(button.dataset.followCandidate)];
+        if (candidate && getVideoId() === videoId) finishAutoFollow(candidate, videoId);
+        modal.remove();
+      });
+    });
+    const close = () => modal.remove();
+    modal.querySelector('#yst2-auto-follow-close')?.addEventListener('click', close);
+    modal.querySelector('#yst2-auto-follow-cancel')?.addEventListener('click', close);
+    modal.addEventListener('click', event => { if (event.target === modal) close(); });
+    modal.addEventListener('keydown', event => { if (event.key === 'Escape') close(); });
+    modal.querySelector('#yst2-auto-follow-manual')?.addEventListener('click', () => {
+      modal.remove();
+      showAddVideoDialog();
+    });
+  }
+
+  function showKnownSeriesChooser(videoId, seriesList) {
+    const candidates = seriesList.map(series => ({
+      id: series.id,
+      title: series.title,
+      owner: 'Already in your library',
+      thumb: series.episodes.find(item => item.available !== false && !item.unavailable)?.thumb || '',
+      items: series.episodes,
+      knownSeries: series
+    }));
+    activeTab = 'library';
+    librarySearch = '';
+    openPanel();
+    const panel = document.getElementById(PANEL);
+    if (!panel) return;
+    panel.querySelector('#yst2-auto-follow-chooser')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'yst2-auto-follow-chooser';
+    modal.className = 'yst2-modal-backdrop';
+    modal.innerHTML = '<section class="yst2-modal" role="dialog" aria-modal="true" aria-labelledby="yst2-auto-follow-title">'
+      + '<header class="yst2-modal-head"><div><h3 id="yst2-auto-follow-title">Choose a saved series</h3><p class="yst2-muted">This video appears in more than one saved series.</p></div>'
+      + '<button type="button" id="yst2-auto-follow-close" class="yst2-icon" aria-label="Close">×</button></header>'
+      + '<div class="yst2-candidate-list">' + candidates.map((candidate,index) =>
+        '<button type="button" class="yst2-candidate" data-follow-candidate="' + index + '">'
+          + (candidate.thumb ? '<img loading="lazy" alt="" src="' + esc(candidate.thumb) + '">' : '<span class="yst2-candidate-play">▶</span>')
+          + '<span class="yst2-candidate-copy"><strong>' + esc(candidate.title) + '</strong><small>Saved series · ' + candidate.items.length + ' episodes</small></span><span class="yst2-candidate-arrow">›</span></button>'
+      ).join('') + '</div><button type="button" id="yst2-auto-follow-cancel" class="yst2-subbtn">Cancel</button></section>';
+    panel.appendChild(modal);
+    modal.querySelectorAll('[data-follow-candidate]').forEach(button => button.addEventListener('click', () => {
+      const series = candidates[Number(button.dataset.followCandidate)]?.knownSeries;
+      modal.remove();
+      if (series && getVideoId() === videoId) showSeriesInLibrary(series);
+    }));
+    modal.querySelector('#yst2-auto-follow-close')?.addEventListener('click', () => modal.remove());
+    modal.querySelector('#yst2-auto-follow-cancel')?.addEventListener('click', () => modal.remove());
+    modal.addEventListener('click', event => { if (event.target === modal) modal.remove(); });
+    modal.addEventListener('keydown', event => { if (event.key === 'Escape') modal.remove(); });
+  }
+
+  async function followSeriesFromPlayer() {
+    if (playerActionBusy) return;
+    const videoId = getVideoId();
+    const rawList = getPlaylistId();
+    const listId = isSuggestiblePlaylistId(rawList) ? rawList : '';
+    if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
+      if (listId) {
+        activeTab = 'library';
+        openPanel();
+        await syncCurrentPlaylist();
+      } else {
+        activeTab = 'library';
+        openPanel();
+        toast('Open a YouTube video or playlist first.');
+      }
+      return;
+    }
+    const playerId = document.getElementById('movie_player')?.getVideoData?.().video_id
+      || window.ytInitialPlayerResponse?.videoDetails?.videoId || '';
+    if (playerId && playerId !== videoId) {
+      toast('YouTube is switching videos. Tap Series again when playback settles.');
+      return;
+    }
+    if (listId) {
+      const already = findSeries(listId);
+      if (already) {
+        showSeriesInLibrary(already);
+        toast('Already following "' + already.title + '".');
+        return;
+      }
+    } else {
+      const saved = seriesMatchesVideo(videoId);
+      if (saved.length === 1) {
+        showSeriesInLibrary(saved[0]);
+        toast('Opened "' + saved[0].title + '".');
+        return;
+      }
+      if (saved.length > 1) {
+        showKnownSeriesChooser(videoId, saved);
+        return;
+      }
+    }
+    playerActionBusy = true;
+    const capturedVideo = videoId;
+    toast('Finding this series and loading its episodes…');
+    try {
+      if (listId) {
+        try {
+          const catalog = await fetchFullPlaylist(listId);
+          if (getVideoId() === capturedVideo && catalog.items.some(item => item.id === capturedVideo && item.available !== false && !item.unavailable)) {
+            finishAutoFollow({
+              id: listId,
+              title: catalog.title || playlistTitleFromDOM() || listId,
+              items: catalog.items,
+              reverse: inferReverseOrder(catalog.items),
+              score: 2000
+            }, capturedVideo);
+            return;
+          }
+        } catch (error) {
+          console.debug('[YouTube Series] direct playlist follow failed:', error && error.message || error);
+        }
+      }
+      const matches = await discoverPlaylistsForVideo(capturedVideo);
+      if (getVideoId() !== capturedVideo) return;
+      if (matches.length === 1) {
+        finishAutoFollow(matches[0], capturedVideo);
+      } else if (matches.length > 1) {
+        const first = matches[0], second = matches[1];
+        if (first.score >= 100 && first.score - second.score >= 50) finishAutoFollow(first, capturedVideo);
+        else showPlaylistCandidateDialog(capturedVideo, matches);
+      } else {
+        activeTab = 'library';
+        librarySearch = '';
+        openPanel();
+        toast('No matching playlist was found. Add this video manually or paste a playlist link.');
+        showAddVideoDialog();
+      }
+    } catch (error) {
+      console.warn('[YouTube Series] smart follow failed', error);
+      if (getVideoId() === capturedVideo) {
+        activeTab = 'library';
+        librarySearch = '';
+        openPanel();
+        toast(error && error.message || 'Could not discover the complete series.');
+        showAddVideoDialog();
+      }
+    } finally {
+      playerActionBusy = false;
+    }
+  }
+
+  function openFromPlayer() {
+    followSeriesFromPlayer();
+  }
   function ensureUI() {
     addStyles();
     if(!document.getElementById(PANEL)){const p=document.createElement('aside');p.id=PANEL;document.body.appendChild(p);}
