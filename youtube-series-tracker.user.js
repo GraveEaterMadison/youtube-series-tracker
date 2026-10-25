@@ -435,7 +435,7 @@
     const season = /\b(?:season|series)\s*0*(\d{1,3})\b/i.exec(value);
     const parts = value.split(/[|｜]/).map(part => part.trim()).filter(Boolean).map(part => part
       .replace(/\bS\d{1,3}[ ._-]*E\d{1,4}\b/gi, ' ')
-      .replace(/\b(?:episode|ep\.?|part|chapter)\s*#?\s*\d{1,4}\b/gi, ' ')
+      .replace(/(?:\b(?:episode|ep\.?|part|chapter)|épisode)\s*#?\s*\d{1,4}\b/giu, ' ')
       .replace(/\b\d{1,4}\s*\/\s*\d{1,4}\b/g, ' ')
       .replace(/\b(?:full\s+episodes?|official\s+video|english\s+sub(?:titles?)?|english\s+dub|subbed|dubbed|1080p|720p|4k|hd)\b/gi, ' ')
       .replace(/\s+/g, ' ').trim()).filter(Boolean);
@@ -453,7 +453,7 @@
       if (/\bS\d{1,3}[ ._-]*E\d{1,4}\b/i.test(value.slice(compact.index + compact[0].length))) return null;
       return Number(compact[1]) * 10000 + Number(compact[2]);
     }
-    const all = [...value.matchAll(/\b(?:episode|épisode|ep\.?|part|chapter)\s*#?\s*(\d{1,4})\b/gi)];
+    const all = [...value.matchAll(/(?:\b(?:episode|ep\.?|part|chapter)|épisode)\s*#?\s*(\d{1,4})\b/giu)];
     if (all.length !== 1) return null;
     const season = /\b(?:season|series|saison)\s*0*(\d{1,3})\b/i.exec(value);
     return (season ? Number(season[1]) : 0) * 10000 + Number(all[0][1]);
