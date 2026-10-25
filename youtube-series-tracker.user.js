@@ -861,7 +861,8 @@
 
   function seriesHTML(s) {
     const st = stats(s), cont = chooseContinue(s);
-    const cover = s.episodes[0]?.thumb || (s.episodes[0]?.id ? `https://i.ytimg.com/vi/${s.episodes[0].id}/hqdefault.jpg` : '');
+    const coverEpisode = orderedEpisodes(s).find(e => e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
+    const cover = coverEpisode?.thumb || (coverEpisode?.id ? `https://i.ytimg.com/vi/${coverEpisode.id}/hqdefault.jpg` : '');
     return `<section class="yst2-series yst2-filter-item" data-series-card="${esc(s.id)}">
       <div class="yst2-series-overview">
         <div class="yst2-series-art">${cover ? `<img loading="lazy" src="${esc(cover)}" alt="">` : '<div class="yst2-series-art-placeholder">▶</div>'}<span>${st.total} eps</span></div>
@@ -886,17 +887,18 @@
   }
   function renderPanel() {
     const p = document.getElementById(PANEL); if (!p) return;
-    const total = db.series.reduce((n,s)=>n+s.episodes.length,0);
-    const watched = db.series.reduce((n,s)=>n+s.episodes.filter(e=>stateFor(e.id).watched).length,0);
+    const allEpisodes = db.series.flatMap(s => s.episodes || []).filter(e => e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
+    const total = allEpisodes.length;
+    const watched = allEpisodes.filter(e => stateFor(e.id).watched).length;
     const allCont = db.series.map(s=>({s,e:chooseContinue(s)})).filter(x=>x.e);
     const pct = total ? Math.round(watched / total * 100) : 0;
     const historyCount = Object.keys(db.history).length;
     let body = '';
     if (activeTab === 'library') body = db.series.length ? db.series.map(seriesHTML).join('') :
-      `<div class="yst2-empty"><div class="yst2-empty-art"><span>▶</span></div><h3>Your library starts here</h3><p>Collect playlists or add individual videos to build a personal watchlist. Your progress stays in this browser.</p><div class="yst2-empty-actions"><button id="yst2-empty-add" class="yst2-mainbtn">＋ Add current video</button><button id="yst2-empty-sync" class="yst2-subbtn">Sync a playlist</button></div></div>`;
+      \`<div class="yst2-empty"><div class="yst2-empty-art"><span>▶</span></div><h3>Your library starts here</h3><p>Collect playlists or add individual videos to build a personal watchlist. Your progress stays in this browser.</p><div class="yst2-empty-actions"><button id="yst2-empty-add" class="yst2-mainbtn">＋ Add current video</button><button id="yst2-empty-sync" class="yst2-subbtn">Sync a playlist</button></div></div>\`;
     if (activeTab === 'continue') body = allCont.length ? allCont.map(({s,e})=>
-      `<section class="yst2-series yst2-filter-item"><div class="yst2-continue-series-title">${esc(s.title)}</div>${episodeHTML(s,e)}<button class="yst2-continue" data-continue="${esc(s.id)}"><span class="yst2-continue-icon">▶</span><span class="yst2-continue-copy"><strong>Resume episode</strong><small>${esc(e.title)}</small></span><span class="yst2-continue-arrow">↗</span></button></section>`).join('') :
-      `<div class="yst2-empty"><div class="yst2-empty-art"><span>Ⅱ</span></div><h3>All caught up?</h3><p>When you start an episode, your in-progress videos will show up here for quick resuming.</p></div>`;
+      \`<section class="yst2-series yst2-filter-item"><div class="yst2-continue-series-title">\${esc(s.title)}</div>\${episodeHTML(s,e)}<button class="yst2-continue" data-continue="\${esc(s.id)}"><span class="yst2-continue-icon">▶</span><span class="yst2-continue-copy"><strong>Resume episode</strong><small>\${esc(e.title)}</small></span><span class="yst2-continue-arrow">↗</span></button></section>\`).join('') :
+      \`<div class="yst2-empty"><div class="yst2-empty-art"><span>Ⅱ</span></div><h3>All caught up?</h3><p>When you start an episode, your in-progress videos will show up here for quick resuming.</p></div>\`;
     if (activeTab === 'history') body = renderHistory();
     if (activeTab === 'settings') body = settingsHTML();
     const tabs = [
@@ -905,26 +907,26 @@
       ['history','History',historyCount],
       ['settings','Settings',null]
     ];
-    p.innerHTML = `<header class="yst2-top">
+    p.innerHTML = \`<header class="yst2-top">
         <div class="yst2-brand-row"><div class="yst2-brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M23.5 6.2a3 3 0 0 0-2.1-2.1C19.5 3.6 12 3.6 12 3.6s-7.5 0-9.4.5A3 3 0 0 0 .5 6.2C0 8.1 0 12 0 12s0 3.9.5 5.8a3 3 0 0 0 2.1 2.1c1.9.5 9.4.5 9.4.5s7.5 0 9.4-.5a3 3 0 0 0 2.1-2.1C24 15.9 24 12 24 12s0-3.9-.5-5.8ZM9.6 15.6V8.4L15.9 12l-6.3 3.6Z"/></svg></div>
           <div><div class="yst2-logo">Series Tracker</div><div class="yst2-tagline">Your YouTube, in order.</div></div></div>
         <button id="yst2-close" class="yst2-icon yst2-close" aria-label="Close tracker" title="Close">×</button>
       </header>
       <section id="yst2-dashboard" class="yst2-dashboard" aria-label="Your tracking overview">
-        <div class="yst2-metric"><span>Series</span><strong>${db.series.length}</strong></div>
-        <div class="yst2-metric"><span>Episodes</span><strong>${total}</strong></div>
-        <div class="yst2-metric"><span>Watched</span><strong>${pct}<small>%</small></strong></div>
-        <div class="yst2-overall-progress"><div class="yst2-overall-label"><span>Overall progress</span><span>${watched} of ${total}</span></div><div class="yst2-bar big" role="progressbar" aria-label="Overall progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><i style="width:${pct}%"></i></div></div>
+        <div class="yst2-metric"><span>Series</span><strong>\${db.series.length}</strong></div>
+        <div class="yst2-metric"><span>Episodes</span><strong>\${total}</strong></div>
+        <div class="yst2-metric"><span>Watched</span><strong>\${pct}<small>%</small></strong></div>
+        <div class="yst2-overall-progress"><div class="yst2-overall-label"><span>Overall progress</span><span>\${watched} of \${total}</span></div><div class="yst2-bar big" role="progressbar" aria-label="Overall progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="\${pct}"><i style="width:\${pct}%"></i></div></div>
       </section>
       <section class="yst2-toolbar" aria-label="Tracker actions">
         <div class="yst2-primary-actions"><button id="yst2-add-current" class="yst2-mainbtn"><span aria-hidden="true">＋</span> Add video</button><button id="yst2-sync" class="yst2-subbtn"><span aria-hidden="true">↻</span> Sync playlist</button></div>
         <div class="yst2-data-actions"><button id="yst2-export" class="yst2-icon" title="Export backup" aria-label="Export backup">⇩</button><button id="yst2-import" class="yst2-icon" title="Import backup" aria-label="Import backup">⇧</button></div>
       </section>
-      <nav class="yst2-tabs" role="tablist" aria-label="Tracker sections">${tabs.map(([k,v,count])=>`<button role="tab" data-tab="${k}" aria-selected="${activeTab===k?'true':'false'}" class="${activeTab===k?'active':''}"><span>${v}</span>${count===null?'':`<span class="yst2-tab-count">${count}</span>`}</button>`).join('')}</nav>
-      ${activeTab === 'settings' ? '' : `<div class="yst2-searchwrap"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"></circle><path d="m16 16 5 5"></path></svg><input id="yst2-search" type="search" value="${esc(librarySearch)}" placeholder="${activeTab==='history'?'Search history matches':'Search series and episodes'}" aria-label="Search ${activeTab==='history'?'history matches':'series and episodes'}"><kbd>⌕</kbd></div>`}
+      <nav class="yst2-tabs" role="tablist" aria-label="Tracker sections">\${tabs.map(([k,v,count])=>\`<button role="tab" data-tab="\${k}" aria-selected="\${activeTab===k?'true':'false'}" class="\${activeTab===k?'active':''}"><span>\${v}</span>\${count===null?'':\`<span class="yst2-tab-count">\${count}</span>\`}</button>\`).join('')}</nav>
+      \${activeTab === 'settings' ? '' : \`<div class="yst2-searchwrap"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"></circle><path d="m16 16 5 5"></path></svg><input id="yst2-search" type="search" value="\${esc(librarySearch)}" placeholder="\${activeTab==='history'?'Search history matches':'Search series and episodes'}" aria-label="Search \${activeTab==='history'?'history matches':'series and episodes'}"><kbd>⌕</kbd></div>\`}
       <div id="yst2-search-empty" class="yst2-search-empty" hidden>No matches. Try another title.</div>
-      <div class="yst2-content">${body}</div>
-      <footer class="yst2-footer"><span class="yst2-privacy"><span></span> Stored locally in this browser</span><span>${db.lastSync?`Synced ${new Date(db.lastSync).toLocaleDateString()}`:'Not synced yet'}</span></footer>`;
+      <div class="yst2-content">\${body}</div>
+      <footer class="yst2-footer"><span class="yst2-privacy"><span></span> Stored locally in this browser</span><span>\${db.lastSync?\`Synced \${new Date(db.lastSync).toLocaleDateString()}\`:'Not synced yet'}</span></footer>\`;
     bindPanel();
   }
   function settingsHTML() {
@@ -1055,8 +1057,8 @@
     button.type = 'button';
     button.id = PLAYER_BTN;
     button.className = 'ytp-button yst2-player-button';
-    button.title = 'YouTube Series Tracker';
-    button.setAttribute('aria-label', 'Open YouTube Series Tracker');
+    button.title = 'Follow or open this YouTube series';
+    button.setAttribute('aria-label', 'Follow or open this YouTube series');
     button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 3.5A2.5 2.5 0 0 1 6.5 1h11A2.5 2.5 0 0 1 20 3.5v17a.5.5 0 0 1-.8.4L12 15.5l-7.2 5.4a.5.5 0 0 1-.8-.4v-17ZM7 5v2h10V5H7Zm0 4v2h7V9H7Z"/></svg>';
     button.addEventListener('click', event => {
       event.preventDefault();
@@ -1405,6 +1407,20 @@
       #${PANEL} [hidden]{display:none!important}
       @media(max-width:600px){.yst2-dashboard{padding:10px 10px 8px;gap:6px}.yst2-metric{padding:9px}.yst2-toolbar{padding:10px;align-items:stretch}.yst2-primary-actions{flex:1}.yst2-primary-actions button{flex:1;padding:9px 7px}.yst2-data-actions{align-items:stretch}.yst2-tabs{padding:0 10px 9px}.yst2-tabs button{padding:8px 4px;gap:4px}.yst2-content{padding:10px}.yst2-series{padding:10px}.yst2-series-art{width:83px;min-width:83px;aspect-ratio:1/1}.yst2-serieshead .yst2-icon{width:24px;height:24px}.yst2-seriestitle{font-size:12px}.yst2-continue{gap:7px;padding:8px}.yst2-continue-copy strong{font-size:10px}.yst2-continue-copy small{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}.yst2-footer{padding:9px 10px}.yst2-searchwrap{margin-left:10px;margin-right:10px}}
       @media(prefers-reduced-motion:reduce){#${PANEL} *,#${PANEL} *:before,#${PANEL} *:after{transition:none!important;scroll-behavior:auto!important}}
+      #yst2-panel .yst2-series-highlight{border-color:#ff5b79;box-shadow:0 0 0 2px #ff315822,0 8px 28px #0006}
+      #yst2-panel .yst2-thumb-empty{display:grid;place-items:center;color:#747988;font-size:18px}
+      #yst2-panel .yst2-ep.is-unavailable{opacity:.72}
+      #yst2-panel .yst2-epname:disabled{cursor:not-allowed;color:#8d92a0}
+      #yst2-panel .yst2-mark:disabled{cursor:not-allowed;opacity:.35}
+      #yst2-panel .yst2-candidate-list{display:flex;flex-direction:column;gap:7px;margin:10px 0 13px}
+      #yst2-panel .yst2-candidate{display:flex;align-items:center;gap:10px;width:100%;padding:9px;border:1px solid #343743;border-radius:10px;background:#22242d;color:#f1f2f6;text-align:left}
+      #yst2-panel .yst2-candidate:hover{background:#2d303b;border-color:#65505a}
+      #yst2-panel .yst2-candidate img{width:84px;aspect-ratio:16/9;object-fit:cover;border-radius:7px;flex:none}
+      #yst2-panel .yst2-candidate-play{width:84px;height:47px;display:grid;place-items:center;background:#34202a;border-radius:7px;color:#ff8ba0;flex:none}
+      #yst2-panel .yst2-candidate-copy{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1}
+      #yst2-panel .yst2-candidate-copy strong{font-size:12px;line-height:1.4;overflow-wrap:anywhere}
+      #yst2-panel .yst2-candidate-copy small{font-size:10px;color:#a0a5b2}
+      #yst2-panel .yst2-candidate-arrow{font-size:22px;color:#a6abba}
     `;document.head.appendChild(st);
   }
   function trackCurrentVideo() {
