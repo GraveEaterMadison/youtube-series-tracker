@@ -33,6 +33,8 @@
   let tickTimer = null;
   let routeTimer = null;
   let lastSave = 0;
+  let lastPanelRender = 0;
+  const EPISODE_BATCH_SIZE = 50;
   let syncBusy = false;
   let playerActionBusy = false;
   const discoveryCache = new Map();
@@ -1137,31 +1139,76 @@
   function seriesHTML(s) {
     const st = stats(s), cont = chooseContinue(s);
     const coverEpisode = orderedEpisodes(s).find(e => e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
-    const cover = coverEpisode?.thumb || (coverEpisode?.id ? `https://i.ytimg.com/vi/${coverEpisode.id}/hqdefault.jpg` : '');
-    return `<section class="yst2-series yst2-filter-item" data-series-card="${esc(s.id)}">
-      <div class="yst2-series-overview">
-        <div class="yst2-series-art">${cover ? `<img loading="lazy" src="${esc(cover)}" alt="">` : '<div class="yst2-series-art-placeholder">▶</div>'}<span>${st.total} eps</span></div>
-        <div class="yst2-series-info">
-          <header class="yst2-serieshead">
-            <div class="yst2-seriestitle">${esc(s.title)}</div>
-            ${s.playlistId ? `<button class="yst2-icon" data-sync="${esc(s.id)}" title="Refresh entire playlist" aria-label="Refresh ${esc(s.title)}">↻</button>` : '<span class="yst2-manual-label">Manual</span>'}
-            <button class="yst2-icon" data-order="${esc(s.id)}" title="${s.playbackReverse ? 'Use playlist order' : 'Use chronological episode order'}" aria-label="Change episode order">⇅</button>
-            <button class="yst2-icon" data-edit="${esc(s.id)}" title="Rename series" aria-label="Rename ${esc(s.title)}">✎</button>
-            <button class="yst2-icon danger" data-remove="${esc(s.id)}" title="Remove series" aria-label="Remove ${esc(s.title)}">×</button>
-          </header>
-          <div class="yst2-muted">${st.watched}/${st.playable} playable watched <span class="yst2-dot">·</span> ${st.active} in progress</div>
-          <div class="yst2-bar big" role="progressbar" aria-label="${esc(s.title)} progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${st.pct}"><i style="width:${st.pct}%"></i></div>
-          <div class="yst2-series-footline"><span class="yst2-progress-label">${st.pct}% complete</span>${st.left ? `<span>${fmt(st.left)} left</span>` : ''}</div>
-          ${cont ? `<button class="yst2-continue" data-continue="${esc(s.id)}"><span class="yst2-continue-icon">▶</span><span class="yst2-continue-copy"><strong>Continue watching</strong><small>${esc(cont.title)}</small></span><span class="yst2-continue-arrow">↗</span></button>` : '<div class="yst2-done">✓ All episodes watched</div>'}
-        </div>
-      </div>
-      <details class="yst2-details"><summary><span>Episodes</span><span class="yst2-summary-count">${st.total}</span><span class="yst2-summary-spacer"></span><span class="yst2-summary-hint">View list</span><span class="yst2-chevron">⌄</span></summary>
-        <div class="yst2-episode-list">${orderedEpisodes(s).map(e=>episodeHTML(s,e)).join('')}</div>
-      </details>
-    </section>`;
+    const cover = coverEpisode?.thumb || (coverEpisode?.id ? 'https://i.ytimg.com/vi/' + coverEpisode.id + '/hqdefault.jpg' : '');
+    return '<section class="yst2-series yst2-filter-item" data-series-card="' + esc(s.id) + '">'
+      + '<div class="yst2-series-overview">'
+      + '<div class="yst2-series-art">' + (cover ? '<img loading="lazy" src="' + esc(cover) + '" alt="">' : '<div class="yst2-series-art-placeholder">▶</div>') + '<span>' + st.total + ' eps</span></div>'
+      + '<div class="yst2-series-info"><header class="yst2-serieshead">'
+      + '<div class="yst2-seriestitle">' + esc(s.title) + '</div>'
+      + (s.playlistId ? '<button class="yst2-icon" data-sync="' + esc(s.id) + '" title="Refresh entire playlist" aria-label="Refresh ' + esc(s.title) + '">↻</button>' : '<span class="yst2-manual-label">Manual</span>')
+      + '<button class="yst2-icon" data-order="' + esc(s.id) + '" title="' + (s.playbackReverse ? 'Use playlist order' : 'Use chronological episode order') + '" aria-label="Change episode order">⇅</button>'
+      + '<button class="yst2-icon" data-edit="' + esc(s.id) + '" title="Rename series" aria-label="Rename ' + esc(s.title) + '">✎</button>'
+      + '<button class="yst2-icon danger" data-remove="' + esc(s.id) + '" title="Remove series" aria-label="Remove ' + esc(s.title) + '">×</button>'
+      + '</header><div class="yst2-muted">' + st.watched + '/' + st.playable + ' playable watched <span class="yst2-dot">·</span> ' + st.active + ' in progress</div>'
+      + '<div class="yst2-bar big" role="progressbar" aria-label="' + esc(s.title) + ' progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + st.pct + '"><i style="width:' + st.pct + '%"></i></div>'
+      + '<div class="yst2-series-footline"><span class="yst2-progress-label">' + st.pct + '% complete</span>' + (st.left ? '<span>' + fmt(st.left) + ' left</span>' : '') + '</div>'
+      + (cont ? '<button class="yst2-continue" data-continue="' + esc(s.id) + '"><span class="yst2-continue-icon">▶</span><span class="yst2-continue-copy"><strong>Continue watching</strong><small>' + esc(cont.title) + '</small></span><span class="yst2-continue-arrow">↗</span></button>' : '<div class="yst2-done">✓ All episodes watched</div>')
+      + '</div></div>'
+      + '<details class="yst2-details" data-series-details="' + esc(s.id) + '"><summary><span>Episodes</span><span class="yst2-summary-count">' + st.total + '</span><span class="yst2-summary-spacer"></span><span class="yst2-summary-hint">View list</span><span class="yst2-chevron">⌄</span></summary>'
+      + '<div class="yst2-episode-list" data-episode-list="' + esc(s.id) + '" data-offset="0"></div>'
+      + '<button class="yst2-subbtn yst2-load-more" type="button" data-load-more="' + esc(s.id) + '" hidden>Load more episodes</button>'
+      + '</details></section>';
   }
+  function bindEpisodeBatch(article) {
+    const play = article.querySelector('[data-play]');
+    play?.addEventListener('click', () => {
+      if (play.disabled) return;
+      const series = db.series.find(item => item.id === play.dataset.sid);
+      const episode = series?.episodes.find(item => item.id === play.dataset.play && item.available !== false && !item.unavailable);
+      if (series && episode) openEpisode(series, episode);
+    });
+    const mark = article.querySelector('[data-mark]');
+    mark?.addEventListener('click', () => {
+      if (mark.disabled) return;
+      markEpisode(mark.dataset.mark, !stateFor(mark.dataset.mark).watched);
+    });
+  }
+
+  function appendEpisodeBatch(details, requestedTotal) {
+    const series = db.series.find(item => item.id === details.dataset.seriesDetails);
+    const list = details.querySelector('[data-episode-list]');
+    const more = details.querySelector('[data-load-more]');
+    if (!series || !list || !more) return;
+    const episodes = orderedEpisodes(series);
+    const offset = list.children.length;
+    if (offset >= episodes.length) {
+      more.hidden = true;
+      return;
+    }
+    const target = Number.isInteger(requestedTotal)
+      ? Math.min(episodes.length, Math.max(offset + 1, requestedTotal))
+      : Math.min(episodes.length, offset + EPISODE_BATCH_SIZE);
+    const batch = episodes.slice(offset, target);
+    const html = batch.map(episode => episodeHTML(series, episode)).join('');
+    list.insertAdjacentHTML('beforeend', html);
+    for (const article of Array.from(list.children).slice(offset)) bindEpisodeBatch(article);
+    list.dataset.offset = String(list.children.length);
+    const remaining = episodes.length - list.children.length;
+    more.hidden = remaining <= 0;
+    more.textContent = remaining > 0 ? 'Load next ' + Math.min(EPISODE_BATCH_SIZE, remaining) + ' (' + remaining + ' remaining)' : 'All episodes loaded';
+  }
+
   function renderPanel() {
     const p = document.getElementById(PANEL); if (!p) return;
+    const episodeUiState = new Map();
+    p.querySelectorAll('details[data-series-details]').forEach(details => {
+      const list = details.querySelector('[data-episode-list]');
+      episodeUiState.set(details.dataset.seriesDetails, {
+        open: details.open,
+        loaded: list ? list.children.length : 0,
+        scrollTop: list ? list.scrollTop : 0
+      });
+    });
     const allEpisodes = db.series.flatMap(s => s.episodes || []).filter(e => e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
     const total = allEpisodes.length;
     const watched = allEpisodes.filter(e => stateFor(e.id).watched).length;
@@ -1203,6 +1250,21 @@
       <div class="yst2-content">${body}</div>
       <footer class="yst2-footer"><span class="yst2-privacy"><span></span> Stored locally in this browser</span><span>${db.lastSync?`Synced ${new Date(db.lastSync).toLocaleDateString()}`:'Not synced yet'}</span></footer>`;
     bindPanel();
+    for (const [id, state] of episodeUiState) {
+      const details = p.querySelector('details[data-series-details="' + CSS.escape(id) + '"]');
+      if (!details) continue;
+      details.open = state.open;
+      if (state.loaded > 0) {
+        while (details.querySelector('[data-episode-list]').children.length < state.loaded) {
+          const before = details.querySelector('[data-episode-list]').children.length;
+          appendEpisodeBatch(details, state.loaded);
+          const after = details.querySelector('[data-episode-list]').children.length;
+          if (after <= before) break;
+        }
+        const list = details.querySelector('[data-episode-list]');
+        if (list) list.scrollTop = state.scrollTop;
+      }
+    }
   }
   function settingsHTML() {
     const s = db.settings;
@@ -1234,7 +1296,11 @@
       const query = librarySearch.trim().toLocaleLowerCase();
       let visible = 0;
       p.querySelectorAll('.yst2-filter-item').forEach(item => {
-        const show = !query || item.textContent.toLocaleLowerCase().includes(query);
+        let haystack = item.textContent.toLocaleLowerCase();
+        const seriesId = item.dataset.seriesCard || item.querySelector('[data-continue]')?.dataset.continue || '';
+        const series = seriesId ? db.series.find(value => value.id === seriesId) : null;
+        if (series) haystack += ' ' + [series.title, ...series.episodes.map(ep => ep.title || '')].join(' ').toLocaleLowerCase();
+        const show = !query || haystack.includes(query);
         item.hidden = !show;
         if (show) visible++;
       });
@@ -1245,6 +1311,14 @@
     applySearch();
     p.querySelector('#yst2-add-current')?.addEventListener('click', showAddVideoDialog);
     p.querySelector('#yst2-sync')?.addEventListener('click', syncCurrentPlaylist);
+    p.querySelectorAll('details[data-series-details]').forEach(details => {
+      details.addEventListener('toggle', () => {
+        if (details.open && details.querySelector('[data-episode-list]')?.children.length === 0) {
+          appendEpisodeBatch(details);
+        }
+      });
+      details.querySelector('[data-load-more]')?.addEventListener('click', () => appendEpisodeBatch(details));
+    });
     p.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>{activeTab=b.dataset.tab;renderPanel();if(activeTab==='history')scanHistoryPage();}));
     p.querySelectorAll('[data-play]').forEach(b=>b.addEventListener('click',()=>{if(b.disabled)return;const s=db.series.find(x=>x.id===b.dataset.sid),e=s?.episodes.find(x=>x.id===b.dataset.play);if(s&&e)openEpisode(s,e);}));
     p.querySelectorAll('[data-order]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.order);if(!s)return;s.playbackReverse=!s.playbackReverse;saveDB();renderPanel();toast('Episode order: '+(s.playbackReverse?'chronological':'playlist')+'.');}));
@@ -1730,7 +1804,7 @@
       setState(meta.id,{title:meta.title||old.title,position:watched?(dur||video.currentTime):video.currentTime,duration:dur||old.duration,watched},false);
       if(s) db.history[meta.id]={title:meta.title,lastSeen:Date.now()};
       saveDB();
-      if(document.getElementById(PANEL)?.classList.contains('open')&&Date.now()-lastSave>1500){lastSave=Date.now();renderPanel();}
+      if(document.getElementById(PANEL)?.classList.contains('open')&&Date.now()-lastPanelRender>1800){lastPanelRender=Date.now();renderPanel();}
     };
     const onTime=()=>{if(Date.now()-lastSave>=SAVE_MS){lastSave=Date.now();savePosition();}};
     video.addEventListener('timeupdate',onTime);
@@ -1747,7 +1821,7 @@
           setTimeout(()=>{if(video.ended&&getVideoId()===meta.id)openEpisode(s,next,false);},900);
         }
       }
-      if(document.getElementById(PANEL)?.classList.contains('open'))renderPanel();
+      if(document.getElementById(PANEL)?.classList.contains('open')){lastPanelRender=Date.now();renderPanel();}
     };
     video.addEventListener('ended',onEnded);
     activeVideoCleanup=()=>{
