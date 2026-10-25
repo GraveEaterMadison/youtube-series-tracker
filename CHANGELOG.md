@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.4.0
+
+- Make the player button automatically follow the current playlist and name the series from YouTube playlist metadata.
+- If the watch URL has no usable playlist ID, discover candidate playlists from the video's description and YouTube search; verify that each candidate contains the current video and show a chooser when results are ambiguous.
+- Replace page-wide renderer scanning with requested-playlist parsing and bounded, all-or-nothing continuation fetching. Existing saved episodes remain intact if YouTube returns incomplete or unsupported data.
+- Infer likely episode order from numbered titles, preserve original playlist indexes, and display unavailable rows without allowing them to be played or marked watched.
+- Prevent playback from silently adding unrelated videos to a followed playlist and add regression coverage for automatic following and catalog safety.
+
 ## 2.3.0
 
 - Refresh the tracker panel with a compact overview dashboard, clearer primary actions, searchable series/episode/history lists, series cover art, progress indicators, and updated empty states.
