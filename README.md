@@ -6,7 +6,7 @@
 
 A local-first Firefox userscript for tracking YouTube playlists as series: episode progress, a series library, continue-watching, history matching, and backup/restore.
 
-> **Project status: beta.**  YouTube's internal page structures can change without notice.
+> **Project status: beta.** YouTube's internal page structures can change without notice.
 
 ## Features
 
