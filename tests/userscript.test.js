@@ -246,7 +246,8 @@ test('playlist discovery verifies that each candidate catalog contains the curre
 
 test('playback tracker never silently appends a video absent from the followed catalog', () => {
   const track = source.slice(source.indexOf('function trackCurrentVideo()'), source.indexOf('function routeChanged()'));
-  assert.match(track, /const inListedSeries=Boolean\(listSeries && listSeries\.episodes\.some/);
+  assert.match(track, /const listedOccurrence=listSeries\?episodeOccurrence\(listSeries,meta\.id,listOrder\):null/);
+  assert.match(track, /s\.cursorVideoId=meta\.id/);
   assert.doesNotMatch(track, /s\.episodes\.push\(\{id:meta\.id/);
 });
 
@@ -302,4 +303,71 @@ test('localized episode numbers are recognized without guessing ambiguous compil
   const number = vm.runInNewContext('(' + extractSimpleFunction(source, 'episodeNumberFromTitle') + ')');
   assert.equal(number('Épisode 7 — Saison 2'), 20007);
   assert.equal(number('Episode 1 to Episode 12 Compilation'), null);
+});
+
+
+test('resume planner starts from the selected cursor before falling back to the first unwatched episode', () => {
+  const orderedEpisodes = vm.runInNewContext('(' + extractSimpleFunction(source, 'orderedEpisodes') + ')');
+  const chooseContinue = vm.runInNewContext('(' + extractSimpleFunction(source, 'chooseContinue') + ')', {
+    orderedEpisodes,
+    stateFor: id => ({ watched: id === 'aaaaaaaaaaa' })
+  });
+  const series = {
+    cursorVideoId: 'bbbbbbbbbbb',
+    cursorOrder: 1,
+    episodes: [
+      {id:'aaaaaaaaaaa',order:0},
+      {id:'bbbbbbbbbbb',order:1},
+      {id:'ccccccccccc',order:2}
+    ]
+  };
+  assert.equal(chooseContinue(series).id, 'bbbbbbbbbbb');
+  series.cursorVideoId = 'aaaaaaaaaaa';
+  series.cursorOrder = 0;
+  assert.equal(chooseContinue(series).id, 'bbbbbbbbbbb');
+});
+
+test('YouTube channel playlist-tab lookup verifies channel identity before enumerating its playlists', () => {
+  const getEndpoint = vm.runInNewContext('(' + extractSimpleFunction(source, 'channelPlaylistEndpoint') + ')');
+  const channel = 'UCabcdefghijklmnopqrstuv';
+  const valid = {
+    metadata: {channelMetadataRenderer:{externalId:channel}},
+    contents: {twoColumnBrowseResultsRenderer:{tabs:[
+      {tabRenderer:{title:'Home',endpoint:{browseEndpoint:{browseId:channel}}}},
+      {tabRenderer:{title:'Playlists',endpoint:{browseEndpoint:{browseId:channel,params:'PL_PARAMS'}}}}
+    ]}}
+  };
+  assert.equal(getEndpoint(valid, channel), 'PL_PARAMS');
+  assert.equal(getEndpoint(valid, 'UCxxxxxxxxxxxxxxxxxxxxxx'), '');
+});
+
+test('playlist discovery also parses YouTube lockup playlist cards', () => {
+  const rendererText = vm.runInNewContext('(' + extractSimpleFunction(source, 'rendererText') + ')');
+  const seriesSearchTitle = vm.runInNewContext('(' + extractSimpleFunction(source, 'seriesSearchTitle') + ')');
+  const normalizeSearchTokens = vm.runInNewContext('(' + extractSimpleFunction(source, 'normalizeSearchTokens') + ')');
+  const isSuggestiblePlaylistId = vm.runInNewContext('(' + extractSimpleFunction(source, 'isSuggestiblePlaylistId') + ')');
+  const isDiscoveryPlaylistId = vm.runInNewContext('(' + extractSimpleFunction(source, 'isDiscoveryPlaylistId') + ')', {isSuggestiblePlaylistId});
+  const parse = vm.runInNewContext('(' + extractSimpleFunction(source, 'parsePlaylistSearchCandidates') + ')', {
+    rendererText, seriesSearchTitle, normalizeSearchTokens, isDiscoveryPlaylistId
+  });
+  const result = parse({
+    contents: {richGridRenderer:{contents:[{richItemRenderer:{content:{lockupViewModel:{
+      contentType:'LOCKUP_CONTENT_TYPE_PLAYLIST',
+      contentId:'PLabcdefghijk',
+      metadata:{lockupMetadataViewModel:{title:{content:'Skybound Season 1'}}},
+      contentImage:{thumbnailViewModel:{image:{sources:[{url:'https://example.invalid/cover.jpg'}]}}}
+    }}}}]}}
+  }, {title:'Skybound Episode 4',channelId:'UCabcdefghijklmnopqrstuv'});
+  assert.equal(result.length, 1);
+  assert.equal(result[0].id, 'PLabcdefghijk');
+  assert.equal(result[0].title, 'Skybound Season 1');
+  assert.ok(result[0].score > 0);
+});
+
+test('current playlist indexes are normalized from YouTube one-based index URLs', () => {
+  const currentPlaylistIndex = vm.runInNewContext('(' + extractSimpleFunction(source, 'currentPlaylistIndex') + ')', {
+    location:{origin:'https://www.youtube.com'}
+  });
+  assert.equal(currentPlaylistIndex('https://www.youtube.com/watch?v=aaaaaaaaaaa&list=PLabcdefghijk&index=4'), 3);
+  assert.equal(currentPlaylistIndex('https://www.youtube.com/watch?v=aaaaaaaaaaa'), -1);
 });
