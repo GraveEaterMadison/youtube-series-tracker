@@ -590,14 +590,48 @@
     const results = new Map();
     const expectedTitle = seriesSearchTitle(details.title).toLocaleLowerCase();
     const expectedTokens = new Set(normalizeSearchTokens(expectedTitle));
-    const expectedSeason = /\b(?:season|series)\s*0*(\d{1,3})\b/i.exec(details.title)?.[1] || '';
-    walk(data && (data.contents || data), node => {
+    const expectedSeason = /\b(?:season|series|saison)\s*0*(\d{1,3})\b/i.exec(details.title)?.[1] || '';
+    let visited = 0;
+
+    const addCandidate = (id, title, owner, thumb, ownerMatches) => {
+      id = String(id || '');
+      if (!isDiscoveryPlaylistId(id) || results.has(id)) return;
+      title = String(title || id);
+      owner = String(owner || '');
+      const titleTokens = new Set(normalizeSearchTokens(title));
+      let overlap = 0;
+      for (const token of expectedTokens) if (titleTokens.has(token)) overlap++;
+      let score = ownerMatches ? 1000 : 0;
+      score += overlap * 8;
+      if (expectedTitle && title.toLocaleLowerCase().includes(expectedTitle)) score += 60;
+      const candidateSeason = /\b(?:season|series|saison)\s*0*(\d{1,3})\b/i.exec(title)?.[1] || '';
+      if (expectedSeason && candidateSeason) score += expectedSeason === candidateSeason ? 80 : -80;
+      results.set(id, { id, title, owner, thumb: String(thumb || ''), score, items: null, reverse: false });
+    };
+
+    const visit = (node, depth) => {
+      if (!node || typeof node !== 'object' || depth > 24 || visited++ >= 20000) return;
+      if (Array.isArray(node)) {
+        for (const child of node) {
+          if (visited >= 20000) break;
+          visit(child, depth + 1);
+        }
+        return;
+      }
+
+      const lockup = node.lockupViewModel;
+      if (lockup && lockup.contentType === 'LOCKUP_CONTENT_TYPE_PLAYLIST') {
+        const metadata = lockup.metadata && lockup.metadata.lockupMetadataViewModel;
+        const title = metadata && metadata.title && metadata.title.content || '';
+        const imageSources = lockup.contentImage && lockup.contentImage.thumbnailViewModel
+          && lockup.contentImage.thumbnailViewModel.image && lockup.contentImage.thumbnailViewModel.image.sources;
+        const thumb = Array.isArray(imageSources) && imageSources.length ? imageSources[imageSources.length - 1].url : '';
+        addCandidate(lockup.contentId, title, '', thumb, false);
+      }
+
       for (const key of ['playlistRenderer', 'compactPlaylistRenderer', 'gridPlaylistRenderer']) {
-        const playlist = node && node[key];
+        const playlist = node[key];
         if (!playlist) continue;
-        const id = String(playlist.playlistId || '');
-        if (!isDiscoveryPlaylistId(id) || results.has(id)) continue;
-        const title = rendererText(playlist.title) || id;
         const byline = playlist.shortBylineText || playlist.longBylineText || playlist.ownerText || null;
         const owner = rendererText(byline);
         let ownerMatches = false;
@@ -605,21 +639,138 @@
           const browseId = run && run.navigationEndpoint && run.navigationEndpoint.browseEndpoint && run.navigationEndpoint.browseEndpoint.browseId || '';
           if (details.channelId && browseId === details.channelId) ownerMatches = true;
         }
-        const tokens = new Set(normalizeSearchTokens(title));
-        let overlap = 0;
-        for (const token of expectedTokens) if (tokens.has(token)) overlap++;
-        let score = ownerMatches ? 1000 : 0;
-        score += overlap * 8;
-        if (expectedTitle && title.toLocaleLowerCase().includes(expectedTitle)) score += 60;
-        const season = /\b(?:season|series)\s*0*(\d{1,3})\b/i.exec(title)?.[1] || '';
-        if (expectedSeason && season) score += season === expectedSeason ? 80 : -80;
         const thumbnails = playlist.thumbnail && playlist.thumbnail.thumbnails;
         const thumb = Array.isArray(thumbnails) && thumbnails.length ? thumbnails[thumbnails.length - 1].url : '';
-        results.set(id, { id, title, owner, thumb, score, items: null, reverse: false });
+        addCandidate(playlist.playlistId, rendererText(playlist.title), owner, thumb, ownerMatches);
       }
-    });
+
+      for (const key of Object.keys(node)) {
+        if (visited >= 20000) break;
+        visit(node[key], depth + 1);
+      }
+    };
+
+    visit(data && (data.contents || data), 0);
     return [...results.values()].sort((a,b) => b.score - a.score).slice(0, 30);
   }
+
+  function channelBrowseTabs(data) {
+    const contents = data && data.contents || {};
+    const browse = contents.twoColumnBrowseResultsRenderer || contents.singleColumnBrowseResultsRenderer || {};
+    return Array.isArray(browse.tabs) ? browse.tabs : [];
+  }
+
+  function channelPlaylistEndpoint(data, channelId) {
+    const externalId = data && data.metadata && data.metadata.channelMetadataRenderer
+      && data.metadata.channelMetadataRenderer.externalId || '';
+    if (externalId !== channelId) return '';
+    for (const tab of channelBrowseTabs(data)) {
+      const renderer = tab && tab.tabRenderer;
+      const endpoint = renderer && renderer.endpoint && renderer.endpoint.browseEndpoint;
+      if (renderer && renderer.title === 'Playlists'
+          && endpoint && endpoint.browseId === channelId && endpoint.params) return String(endpoint.params);
+    }
+    return '';
+  }
+
+  function scopedContinuationTokens(root) {
+    const tokens = new Set();
+    let visits = 0;
+    const visit = (node, depth) => {
+      if (!node || typeof node !== 'object' || depth > 18 || visits++ >= 10000) return;
+      if (Array.isArray(node)) {
+        for (const child of node) {
+          if (visits >= 10000) break;
+          visit(child, depth + 1);
+        }
+        return;
+      }
+      const direct = node.continuationItemRenderer
+        && node.continuationItemRenderer.continuationEndpoint
+        && node.continuationItemRenderer.continuationEndpoint.continuationCommand
+        && node.continuationItemRenderer.continuationEndpoint.continuationCommand.token;
+      if (direct) tokens.add(String(direct));
+      if (Array.isArray(node.continuations)) {
+        for (const item of node.continuations) {
+          const token = item && item.nextContinuationData && item.nextContinuationData.continuation;
+          if (token) tokens.add(String(token));
+        }
+      }
+      for (const key of ['sectionListRenderer','itemSectionRenderer','gridRenderer','richGridRenderer','richItemRenderer','content','contents','items','continuationItemRenderer','appendContinuationItemsAction','gridContinuation']) {
+        if (node[key] !== undefined) visit(node[key], depth + 1);
+      }
+    };
+    visit(root, 0);
+    return tokens;
+  }
+
+  async function channelPlaylistCandidates(details, budget) {
+    const channelId = String(details.channelId || '');
+    if (!/^UC[A-Za-z0-9_-]{22}$/.test(channelId)) return [];
+    try {
+      const home = await requestInnerTube('browse', { browseId: channelId }, budget);
+      const params = channelPlaylistEndpoint(home, channelId);
+      if (!params) return [];
+      let response = await requestInnerTube('browse', { browseId: channelId, params }, budget);
+      const externalId = response && response.metadata && response.metadata.channelMetadataRenderer
+        && response.metadata.channelMetadataRenderer.externalId || '';
+      if (externalId !== channelId) return [];
+
+      const findPlaylistTab = payload => {
+        const tabs = channelBrowseTabs(payload);
+        return tabs.find(tab => tab && tab.tabRenderer && tab.tabRenderer.title === 'Playlists'
+          && tab.tabRenderer.selected)
+          || tabs.find(tab => tab && tab.tabRenderer && tab.tabRenderer.title === 'Playlists')
+          || null;
+      };
+      const selected = findPlaylistTab(response);
+      if (!selected || !selected.tabRenderer || !selected.tabRenderer.content) return [];
+      const allCandidates = new Map();
+      const ingest = root => {
+        for (const candidate of parsePlaylistSearchCandidates({ contents: root }, details)) {
+          allCandidates.set(candidate.id, {
+            ...candidate,
+            owner: candidate.owner || details.author || 'Channel playlists',
+            // This channel's Playlists tab was verified against the video's own channel.
+            score: candidate.score + 1000
+          });
+          if (allCandidates.size >= 96) break;
+        }
+      };
+      let content = selected.tabRenderer.content;
+      ingest(content);
+      let tokens = scopedContinuationTokens(content);
+      let pages = 0;
+      const seenTokens = new Set();
+      while (tokens.size === 1 && pages < 2 && allCandidates.size < 96
+          && budget.requests < budget.maxRequests && Date.now() < budget.deadline) {
+        const token = tokens.values().next().value;
+        if (!token || seenTokens.has(token)) break;
+        seenTokens.add(token);
+        pages++;
+        response = await requestInnerTube('browse', { continuation: token }, budget);
+        let nextRoot = response && response.continuationContents && response.continuationContents.gridContinuation;
+        if (!nextRoot) {
+          const actions = response && (response.onResponseReceivedActions || response.onResponseReceivedEndpoints) || [];
+          for (const action of actions) {
+            const append = action && action.appendContinuationItemsAction;
+            if (append && Array.isArray(append.continuationItems)) {
+              nextRoot = { contents: append.continuationItems };
+              break;
+            }
+          }
+        }
+        if (!nextRoot) break;
+        ingest(nextRoot);
+        tokens = scopedContinuationTokens(nextRoot);
+      }
+      return [...allCandidates.values()].sort((a,b) => b.score - a.score).slice(0, 30);
+    } catch (error) {
+      console.debug('[YouTube Series] channel playlist discovery unavailable:', error && error.message || error);
+      return [];
+    }
+  }
+
 
   async function discoverPlaylistsForVideo(videoId) {
     const cached = discoveryCache.get(videoId);
@@ -661,6 +812,20 @@
       discoveryCache.set(videoId, { expiresAt: Date.now() + 60 * 60 * 1000, matches });
       return matches;
     }
+    if (details.channelId && budget.requests < budget.maxRequests && Date.now() < budget.deadline) {
+      const channelCandidates = await channelPlaylistCandidates(details, budget);
+      for (const candidate of channelCandidates.slice(0, 8)) {
+        if (budget.requests >= budget.maxRequests || Date.now() >= budget.deadline) break;
+        await verifyCandidate(candidate);
+        if (verified.length >= 4) break;
+      }
+      if (verified.length) {
+        const matches = verified.sort((a,b) => b.score - a.score);
+        discoveryCache.set(videoId, { expiresAt: Date.now() + 60 * 60 * 1000, matches });
+        return matches;
+      }
+    }
+
     const seriesTitle = seriesSearchTitle(details.title) || details.title;
     const queries = [...new Set([
       (details.author ? details.author + ' ' : '') + seriesTitle,
