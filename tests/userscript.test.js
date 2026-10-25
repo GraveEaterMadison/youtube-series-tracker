@@ -283,8 +283,10 @@ test('wrapped playlist-panel rows retain the original YouTube episode index', ()
 
 test('episode-order inference falls back to relative upload ages when episode numbers are absent', () => {
   const number = vm.runInNewContext('(' + extractSimpleFunction(source, 'episodeNumberFromTitle') + ')');
+  const age = vm.runInNewContext('(' + extractSimpleFunction(source, 'episodeAgeRange') + ')');
   const infer = vm.runInNewContext('(' + extractSimpleFunction(source, 'inferReverseOrder') + ')', {
-    episodeNumberFromTitle: number
+    episodeNumberFromTitle: number,
+    episodeAgeRange: age
   });
   const newestFirst = [
     {id:'aaaaaaaaaaa',title:'Opening',videoInfo:'3 days ago • 10K views',available:true},
