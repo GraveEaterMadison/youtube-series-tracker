@@ -3,9 +3,10 @@
 ## 2.4.0
 
 - Make the player button automatically follow the current playlist and name the series from YouTube playlist metadata.
-- If the watch URL has no usable playlist ID, discover candidate playlists from the video's description and YouTube search; verify that each candidate contains the current video and show a chooser when results are ambiguous.
+- If the watch URL has no usable playlist ID, discover candidate playlists from the video's description, the video's own channel Playlists tab, and YouTube search; verify each candidate contains the current video and show a chooser when results are ambiguous.
 - Replace page-wide renderer scanning with requested-playlist parsing and bounded, all-or-nothing continuation fetching. Existing saved episodes remain intact if YouTube returns incomplete or unsupported data.
-- Infer likely episode order from numbered titles, preserve original playlist indexes, and display unavailable rows without allowing them to be played or marked watched.
+- Infer likely episode order from numbered titles or relative upload-age metadata, preserve original playlist indexes, and display unavailable rows without allowing them to be played or marked watched.
+- Store a resume cursor so following a series from a mid-season episode opens at that selected episode; keep cursor and auto-next aligned with YouTube's playlist index.
 - Prevent playback from silently adding unrelated videos to a followed playlist and add regression coverage for automatic following and catalog safety.
 
 ## 2.3.0
