@@ -279,3 +279,25 @@ test('wrapped playlist-panel rows retain the original YouTube episode index', ()
   assert.equal(parsed.items[0].order, 6);
   assert.equal(parsed.items[0].available, true);
 });
+
+
+test('episode-order inference falls back to relative upload ages when episode numbers are absent', () => {
+  const number = vm.runInNewContext('(' + extractSimpleFunction(source, 'episodeNumberFromTitle') + ')');
+  const infer = vm.runInNewContext('(' + extractSimpleFunction(source, 'inferReverseOrder') + ')', {
+    episodeNumberFromTitle: number
+  });
+  const newestFirst = [
+    {id:'aaaaaaaaaaa',title:'Opening',videoInfo:'3 days ago • 10K views',available:true},
+    {id:'bbbbbbbbbbb',title:'Chapter continues',videoInfo:'2 weeks ago • 8K views',available:true},
+    {id:'ccccccccccc',title:'Final chapter',videoInfo:'3 months ago • 2K views',available:true}
+  ];
+  const oldestFirst = [...newestFirst].reverse();
+  assert.equal(infer(newestFirst), true);
+  assert.equal(infer(oldestFirst), false);
+});
+
+test('localized episode numbers are recognized without guessing ambiguous compilations', () => {
+  const number = vm.runInNewContext('(' + extractSimpleFunction(source, 'episodeNumberFromTitle') + ')');
+  assert.equal(number('Épisode 7 — Saison 2'), 20007);
+  assert.equal(number('Episode 1 to Episode 12 Compilation'), null);
+});
