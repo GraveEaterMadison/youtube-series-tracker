@@ -895,10 +895,10 @@
     const historyCount = Object.keys(db.history).length;
     let body = '';
     if (activeTab === 'library') body = db.series.length ? db.series.map(seriesHTML).join('') :
-      \`<div class="yst2-empty"><div class="yst2-empty-art"><span>▶</span></div><h3>Your library starts here</h3><p>Collect playlists or add individual videos to build a personal watchlist. Your progress stays in this browser.</p><div class="yst2-empty-actions"><button id="yst2-empty-add" class="yst2-mainbtn">＋ Add current video</button><button id="yst2-empty-sync" class="yst2-subbtn">Sync a playlist</button></div></div>\`;
+      `<div class="yst2-empty"><div class="yst2-empty-art"><span>▶</span></div><h3>Your library starts here</h3><p>Collect playlists or add individual videos to build a personal watchlist. Your progress stays in this browser.</p><div class="yst2-empty-actions"><button id="yst2-empty-add" class="yst2-mainbtn">＋ Add current video</button><button id="yst2-empty-sync" class="yst2-subbtn">Sync a playlist</button></div></div>`;
     if (activeTab === 'continue') body = allCont.length ? allCont.map(({s,e})=>
-      \`<section class="yst2-series yst2-filter-item"><div class="yst2-continue-series-title">\${esc(s.title)}</div>\${episodeHTML(s,e)}<button class="yst2-continue" data-continue="\${esc(s.id)}"><span class="yst2-continue-icon">▶</span><span class="yst2-continue-copy"><strong>Resume episode</strong><small>\${esc(e.title)}</small></span><span class="yst2-continue-arrow">↗</span></button></section>\`).join('') :
-      \`<div class="yst2-empty"><div class="yst2-empty-art"><span>Ⅱ</span></div><h3>All caught up?</h3><p>When you start an episode, your in-progress videos will show up here for quick resuming.</p></div>\`;
+      `<section class="yst2-series yst2-filter-item"><div class="yst2-continue-series-title">${esc(s.title)}</div>${episodeHTML(s,e)}<button class="yst2-continue" data-continue="${esc(s.id)}"><span class="yst2-continue-icon">▶</span><span class="yst2-continue-copy"><strong>Resume episode</strong><small>${esc(e.title)}</small></span><span class="yst2-continue-arrow">↗</span></button></section>`).join('') :
+      `<div class="yst2-empty"><div class="yst2-empty-art"><span>Ⅱ</span></div><h3>All caught up?</h3><p>When you start an episode, your in-progress videos will show up here for quick resuming.</p></div>`;
     if (activeTab === 'history') body = renderHistory();
     if (activeTab === 'settings') body = settingsHTML();
     const tabs = [
@@ -907,26 +907,26 @@
       ['history','History',historyCount],
       ['settings','Settings',null]
     ];
-    p.innerHTML = \`<header class="yst2-top">
+    p.innerHTML = `<header class="yst2-top">
         <div class="yst2-brand-row"><div class="yst2-brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M23.5 6.2a3 3 0 0 0-2.1-2.1C19.5 3.6 12 3.6 12 3.6s-7.5 0-9.4.5A3 3 0 0 0 .5 6.2C0 8.1 0 12 0 12s0 3.9.5 5.8a3 3 0 0 0 2.1 2.1c1.9.5 9.4.5 9.4.5s7.5 0 9.4-.5a3 3 0 0 0 2.1-2.1C24 15.9 24 12 24 12s0-3.9-.5-5.8ZM9.6 15.6V8.4L15.9 12l-6.3 3.6Z"/></svg></div>
           <div><div class="yst2-logo">Series Tracker</div><div class="yst2-tagline">Your YouTube, in order.</div></div></div>
         <button id="yst2-close" class="yst2-icon yst2-close" aria-label="Close tracker" title="Close">×</button>
       </header>
       <section id="yst2-dashboard" class="yst2-dashboard" aria-label="Your tracking overview">
-        <div class="yst2-metric"><span>Series</span><strong>\${db.series.length}</strong></div>
-        <div class="yst2-metric"><span>Episodes</span><strong>\${total}</strong></div>
-        <div class="yst2-metric"><span>Watched</span><strong>\${pct}<small>%</small></strong></div>
-        <div class="yst2-overall-progress"><div class="yst2-overall-label"><span>Overall progress</span><span>\${watched} of \${total}</span></div><div class="yst2-bar big" role="progressbar" aria-label="Overall progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="\${pct}"><i style="width:\${pct}%"></i></div></div>
+        <div class="yst2-metric"><span>Series</span><strong>${db.series.length}</strong></div>
+        <div class="yst2-metric"><span>Episodes</span><strong>${total}</strong></div>
+        <div class="yst2-metric"><span>Watched</span><strong>${pct}<small>%</small></strong></div>
+        <div class="yst2-overall-progress"><div class="yst2-overall-label"><span>Overall progress</span><span>${watched} of ${total}</span></div><div class="yst2-bar big" role="progressbar" aria-label="Overall progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><i style="width:${pct}%"></i></div></div>
       </section>
       <section class="yst2-toolbar" aria-label="Tracker actions">
         <div class="yst2-primary-actions"><button id="yst2-add-current" class="yst2-mainbtn"><span aria-hidden="true">＋</span> Add video</button><button id="yst2-sync" class="yst2-subbtn"><span aria-hidden="true">↻</span> Sync playlist</button></div>
         <div class="yst2-data-actions"><button id="yst2-export" class="yst2-icon" title="Export backup" aria-label="Export backup">⇩</button><button id="yst2-import" class="yst2-icon" title="Import backup" aria-label="Import backup">⇧</button></div>
       </section>
-      <nav class="yst2-tabs" role="tablist" aria-label="Tracker sections">\${tabs.map(([k,v,count])=>\`<button role="tab" data-tab="\${k}" aria-selected="\${activeTab===k?'true':'false'}" class="\${activeTab===k?'active':''}"><span>\${v}</span>\${count===null?'':\`<span class="yst2-tab-count">\${count}</span>\`}</button>\`).join('')}</nav>
-      \${activeTab === 'settings' ? '' : \`<div class="yst2-searchwrap"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"></circle><path d="m16 16 5 5"></path></svg><input id="yst2-search" type="search" value="\${esc(librarySearch)}" placeholder="\${activeTab==='history'?'Search history matches':'Search series and episodes'}" aria-label="Search \${activeTab==='history'?'history matches':'series and episodes'}"><kbd>⌕</kbd></div>\`}
+      <nav class="yst2-tabs" role="tablist" aria-label="Tracker sections">${tabs.map(([k,v,count])=>`<button role="tab" data-tab="${k}" aria-selected="${activeTab===k?'true':'false'}" class="${activeTab===k?'active':''}"><span>${v}</span>${count===null?'':`<span class="yst2-tab-count">${count}</span>`}</button>`).join('')}</nav>
+      ${activeTab === 'settings' ? '' : `<div class="yst2-searchwrap"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"></circle><path d="m16 16 5 5"></path></svg><input id="yst2-search" type="search" value="${esc(librarySearch)}" placeholder="${activeTab==='history'?'Search history matches':'Search series and episodes'}" aria-label="Search ${activeTab==='history'?'history matches':'series and episodes'}"><kbd>⌕</kbd></div>`}
       <div id="yst2-search-empty" class="yst2-search-empty" hidden>No matches. Try another title.</div>
-      <div class="yst2-content">\${body}</div>
-      <footer class="yst2-footer"><span class="yst2-privacy"><span></span> Stored locally in this browser</span><span>\${db.lastSync?\`Synced \${new Date(db.lastSync).toLocaleDateString()}\`:'Not synced yet'}</span></footer>\`;
+      <div class="yst2-content">${body}</div>
+      <footer class="yst2-footer"><span class="yst2-privacy"><span></span> Stored locally in this browser</span><span>${db.lastSync?`Synced ${new Date(db.lastSync).toLocaleDateString()}`:'Not synced yet'}</span></footer>`;
     bindPanel();
   }
   function settingsHTML() {
