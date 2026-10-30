@@ -1,8 +1,8 @@
 {
   "name": "youtube-series-tracker",
-  "version": "2.5.1",
+  "version": "2.6.1",
   "private": false,
-  "description": "Local-first YouTube series tracker with Morphe-inspired progress, start-here, and library visibility controls",
+  "description": "Local-first YouTube series tracker with Morphe-inspired follow, catalog, progress, resume, history, and safe backup workflows",
   "license": "MIT",
   "scripts": {
     "check": "node --check youtube-series-tracker.user.js",
