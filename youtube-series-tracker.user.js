@@ -1070,9 +1070,55 @@
     saveDB();
     return series;
   }
+  async function refreshSeries(seriesId, quiet = false) {
+    const series = findSeries(seriesId);
+    if (!series || !series.playlistId || syncBusy) return false;
+    syncBusy = true;
+    series.lastRefreshAttemptAt = Date.now();
+    saveDB();
+    if (!quiet) toast('Refreshing “' + series.title + '”…');
+    try {
+      const catalog = await fetchFullPlaylist(series.playlistId);
+      const latest = findSeries(seriesId);
+      if (!latest) return false;
+      const merged = mergeSeries(seriesId, catalog.title || latest.title, catalog.items);
+      merged.refreshRetryAt = 0;
+      merged.refreshError = '';
+      saveDB();
+      renderPanel();
+      if (!quiet) toast('Refreshed “' + merged.title + '” · ' + merged.episodes.length + ' episodes.');
+      return true;
+    } catch (error) {
+      const latest = findSeries(seriesId);
+      if (latest) {
+        latest.refreshRetryAt = Date.now() + 30 * 60 * 1000;
+        latest.refreshError = String(error?.message || 'Catalog refresh failed').slice(0, 240);
+        saveDB();
+      }
+      if (!quiet) toast((error?.message || 'Could not refresh playlist.') + ' The saved catalog was kept.');
+      return false;
+    } finally {
+      syncBusy = false;
+    }
+  }
+  async function refreshStaleSeries() {
+    if (!db.settings.catalogAutoRefresh || staleRefreshBusy || syncBusy) return;
+    staleRefreshBusy = true;
+    try {
+      const due = db.series.filter(series => catalogRefreshDue(series)).slice(0, 2);
+      for (const series of due) {
+        if (syncBusy) break;
+        await refreshSeries(series.id, true);
+      }
+    } finally {
+      staleRefreshBusy = false;
+    }
+  }
   async function syncCurrentPlaylist() {
     const id = getPlaylistId();
     if (!id) { toast('Open a YouTube playlist first.'); return; }
+    const existing = findSeries(id);
+    if (existing) { await refreshSeries(id,false); return; }
     if (syncBusy) return;
     syncBusy = true; toast('Syncing the full playlist…');
     try {
@@ -1100,6 +1146,7 @@
       playable: playable.length,
       watched,
       active,
+      newCount: Array.isArray(s.newEpisodeIds) ? s.newEpisodeIds.length : 0,
       pct: playable.length ? Math.round(watched / playable.length * 100) : 0,
       left
     };
@@ -1189,23 +1236,7 @@
     return true;
   }
   function chooseContinue(s) {
-    const eps = orderedEpisodes(s).filter(e =>
-      e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
-    const startHere = s && s.startHereVideoId
-      ? eps.find(e => e.id === s.startHereVideoId && (!Number.isInteger(s.startHereOrder) || e.order === s.startHereOrder))
-      : null;
-    if (startHere) return startHere;
-    const cursorIndex = s && s.cursorVideoId
-      ? eps.findIndex(e => e.id === s.cursorVideoId && (!Number.isInteger(s.cursorOrder) || e.order === s.cursorOrder))
-      : -1;
-    if (cursorIndex >= 0) {
-      const cursor = eps[cursorIndex];
-      if (!isWatched(cursor.id)) return cursor;
-      const afterCursor = eps.slice(cursorIndex + 1).find(e => !isWatched(e.id));
-      if (afterCursor) return afterCursor;
-    }
-    return eps.find(e => !isWatched(e.id) && stateFor(e.id).position > 5) ||
-      eps.find(e => !isWatched(e.id)) || null;
+    return resumePlan(s).episode;
   }
   function chooseNext(s, id, requestedOrder) {
     const eps = orderedEpisodes(s).filter(e =>
@@ -1384,8 +1415,47 @@
     titleInput.focus();
   }
 
+  function showRecoveryChooser(series) {
+    if (!series) return;
+    const panel = document.getElementById(PANEL);
+    if (!panel) return;
+    panel.querySelector('#yst2-recovery-dialog')?.remove();
+    const remembered = series.recoveryVideoId || series.cursorVideoId || '';
+    const occurrences = orderedEpisodes(series).filter(ep => ep.available !== false && !ep.unavailable && /^[A-Za-z0-9_-]{11}$/.test(ep.id));
+    const modal = document.createElement('div');
+    modal.id = 'yst2-recovery-dialog';
+    modal.className = 'yst2-modal-backdrop';
+    modal.innerHTML = '<section class="yst2-modal" role="dialog" aria-modal="true" aria-labelledby="yst2-recovery-title">'
+      + '<header class="yst2-modal-head"><div><h3 id="yst2-recovery-title">Choose where to continue</h3><p class="yst2-muted">The playlist changed, so the saved episode position needs your confirmation.</p></div>'
+      + '<button type="button" class="yst2-icon" data-recovery-close aria-label="Close">×</button></header>'
+      + '<p class="yst2-muted">' + (remembered ? 'Previous saved video: ' + esc(remembered) : 'Select an episode to continue from.') + '</p>'
+      + '<div class="yst2-candidate-list">' + occurrences.map(ep => '<button class="yst2-candidate" type="button" data-recovery-episode="' + esc(ep.id) + '" data-order="' + esc(ep.order) + '">'
+        + '<span class="yst2-candidate-copy"><strong>' + esc(ep.title || ep.id) + '</strong><small>' + (isWatched(ep.id) ? 'Watched' : (stateFor(ep.id).position > 5 ? 'Resume at ' + fmt(stateFor(ep.id).position) : 'Not started')) + '</small></span><span class="yst2-candidate-arrow">›</span></button>').join('')
+      + '</div><button type="button" class="yst2-subbtn" data-recovery-close>Cancel</button></section>';
+    panel.appendChild(modal);
+    modal.querySelectorAll('[data-recovery-episode]').forEach(button => button.addEventListener('click', () => {
+      const episode = occurrences.find(ep => ep.id === button.dataset.recoveryEpisode && ep.order === Number(button.dataset.order));
+      if (!episode) return;
+      series.cursorVideoId = episode.id;
+      series.cursorOrder = episode.order;
+      series.cursorRevision = Number(series.catalogRevision) || 0;
+      series.cursorUpdatedAt = Date.now();
+      series.recoveryRequired = false;
+      series.recoveryVideoId = '';
+      series.startHereVideoId = '';
+      series.startHereOrder = -1;
+      saveDB();
+      modal.remove();
+      renderPanel();
+      openEpisode(series, episode);
+    }));
+    modal.querySelectorAll('[data-recovery-close]').forEach(button => button.addEventListener('click', () => modal.remove()));
+    modal.addEventListener('click', event => { if (event.target === modal) modal.remove(); });
+    modal.addEventListener('keydown', event => { if (event.key === 'Escape') modal.remove(); });
+  }
+
   function seriesHTML(s) {
-    const st = stats(s), cont = chooseContinue(s);
+    const st = stats(s), plan = resumePlan(s), cont = plan.episode;
     const coverEpisode = orderedEpisodes(s).find(e => e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
     const cover = coverEpisode?.thumb || (coverEpisode?.id ? 'https://i.ytimg.com/vi/' + coverEpisode.id + '/hqdefault.jpg' : '');
     return '<section class="yst2-series yst2-filter-item" data-series-card="' + esc(s.id) + '">'
@@ -1393,7 +1463,9 @@
       + '<div class="yst2-series-art">' + (cover ? '<img loading="lazy" src="' + esc(cover) + '" alt="">' : '<div class="yst2-series-art-placeholder">▶</div>') + '<span>' + st.total + ' eps</span></div>'
       + '<div class="yst2-series-info"><header class="yst2-serieshead">'
       + '<div class="yst2-seriestitle">' + esc(s.title) + '</div>'
+      + (st.newCount ? '<button class="yst2-new-count" data-ack-new="' + esc(s.id) + '" title="Acknowledge new episodes">+' + st.newCount + ' new</button>' : '')
       + (s.playlistId ? '<button class="yst2-icon" data-sync="' + esc(s.id) + '" title="Refresh entire playlist" aria-label="Refresh ' + esc(s.title) + '">↻</button>' : '<span class="yst2-manual-label">Manual</span>')
+      + (s.playlistId ? '<button class="yst2-icon" data-open-playlist="' + esc(s.id) + '" title="Open playlist in YouTube" aria-label="Open playlist in YouTube">↗</button>' : '')
       + '<button class="yst2-icon" data-hide-watched="' + esc(s.id) + '" title="' + (s.hideWatched ? 'Show watched episodes' : 'Hide watched episodes') + '" aria-label="' + (s.hideWatched ? 'Show watched episodes' : 'Hide watched episodes') + '">' + (s.hideWatched ? '◉' : '◌') + '</button>'
       + '<button class="yst2-icon" data-order="' + esc(s.id) + '" title="' + (s.playbackReverse ? 'Use playlist order' : 'Use chronological episode order') + '" aria-label="Change episode order">⇅</button>'
       + '<button class="yst2-icon" data-edit="' + esc(s.id) + '" title="Rename series" aria-label="Rename ' + esc(s.title) + '">✎</button>'
@@ -1401,7 +1473,7 @@
       + '</header><div class="yst2-muted">' + st.watched + '/' + st.playable + ' playable watched <span class="yst2-dot">·</span> ' + st.active + ' in progress</div>'
       + '<div class="yst2-bar big" role="progressbar" aria-label="' + esc(s.title) + ' progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + st.pct + '"><i style="width:' + st.pct + '%"></i></div>'
       + '<div class="yst2-series-footline"><span class="yst2-progress-label">' + st.pct + '% complete</span>' + (st.left ? '<span>' + fmt(st.left) + ' left</span>' : '') + '</div>'
-      + (cont ? '<button class="yst2-continue" data-continue="' + esc(s.id) + '"><span class="yst2-continue-icon">▶</span><span class="yst2-continue-copy"><strong>Continue watching</strong><small>' + esc(cont.title) + '</small></span><span class="yst2-continue-arrow">↗</span></button>' : '<div class="yst2-done">✓ All episodes watched</div>')
+      + (plan.kind === 'CHOOSE' ? '<button class="yst2-continue" data-recovery="' + esc(s.id) + '"><span class="yst2-continue-icon">↗</span><span class="yst2-continue-copy"><strong>Choose where to continue</strong><small>The playlist changed; select an episode</small></span></button>' : cont ? '<button class="yst2-continue" data-continue="' + esc(s.id) + '"><span class="yst2-continue-icon">▶</span><span class="yst2-continue-copy"><strong>Continue watching</strong><small>' + esc(cont.title) + '</small></span><span class="yst2-continue-arrow">↗</span></button>' : plan.kind === 'NO_PLAYABLE' ? '<div class="yst2-done">No playable episodes in this playlist</div>' : '<div class="yst2-done">✓ All episodes watched</div>')
       + '</div></div>'
       + '<details class="yst2-details" data-series-details="' + esc(s.id) + '"><summary><span>Episodes</span><span class="yst2-summary-count">' + st.total + '</span><span class="yst2-summary-spacer"></span><span class="yst2-summary-hint">View list</span><span class="yst2-chevron">⌄</span></summary>'
       + '<div class="yst2-episode-list" data-episode-list="' + esc(s.id) + '" data-offset="0"></div>'
@@ -1587,13 +1659,16 @@
     p.querySelectorAll('[data-play]').forEach(b=>b.addEventListener('click',()=>{if(b.disabled)return;const s=db.series.find(x=>x.id===b.dataset.sid),e=s?.episodes.find(x=>x.id===b.dataset.play);if(s&&e)openEpisode(s,e);}));
     p.querySelectorAll('[data-hide-watched]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.hideWatched);if(!s)return;s.hideWatched=!s.hideWatched;saveDB();renderPanel();toast(s.hideWatched?'Watched episodes hidden.':'Watched episodes shown.');}));
     p.querySelectorAll('[data-order]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.order);if(!s)return;s.playbackReverse=!s.playbackReverse;saveDB();renderPanel();toast('Episode order: '+(s.playbackReverse?'chronological':'playlist')+'.');}));
-    p.querySelectorAll('[data-continue]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.continue);if(s)openEpisode(s,chooseContinue(s));}));
+    p.querySelectorAll('[data-continue]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.continue);const plan=s&&resumePlan(s);if(s&&plan?.episode){acknowledgeNewEpisodes(s.id);openEpisode(s,plan.episode);}}));
+    p.querySelectorAll('[data-recovery]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.recovery);if(s)showRecoveryChooser(s);}));
+    p.querySelectorAll('[data-ack-new]').forEach(b=>b.addEventListener('click',()=>acknowledgeNewEpisodes(b.dataset.ackNew)));
+    p.querySelectorAll('[data-open-playlist]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.openPlaylist);if(s?.playlistId)location.href='/playlist?list='+encodeURIComponent(s.playlistId);}));
     p.querySelectorAll('[data-mark]').forEach(b=>b.addEventListener('click',()=>{const id=b.dataset.mark;markEpisode(id,!isWatched(id));}));
     p.querySelectorAll('[data-through]').forEach(b=>b.addEventListener('click',()=>{const series=db.series.find(item=>item.id===b.dataset.sid);const ep=series?.episodes.find(item=>item.id===b.dataset.through&&item.order===Number(b.dataset.order));if(series&&ep)markThrough(series,ep);}));
     p.querySelectorAll('[data-start-here]').forEach(b=>b.addEventListener('click',()=>{const series=db.series.find(item=>item.id===b.dataset.sid);const ep=series?.episodes.find(item=>item.id===b.dataset.startHere&&item.order===Number(b.dataset.order));if(series&&ep)setSeriesStartHere(series,ep);}));
     p.querySelector('#yst2-undo')?.addEventListener('click',undoLastChange);
     p.querySelectorAll('[data-remove]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.remove);if(s&&confirm(`Remove “${s.title}” from the library? Progress will be retained for videos that appear in other series.`)){db.series=db.series.filter(x=>x.id!==s.id);saveDB();renderPanel();}}));
-    p.querySelectorAll('[data-sync]').forEach(b=>b.addEventListener('click',async()=>{if(getPlaylistId()!==b.dataset.sync){toast('Open this series playlist first, then refresh it.');return;}await syncCurrentPlaylist();}));
+    p.querySelectorAll('[data-sync]').forEach(b=>b.addEventListener('click',async()=>{await refreshSeries(b.dataset.sync,false);}));
     p.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.edit);if(!s)return;const n=prompt('Series name',s.title);if(n?.trim()){s.title=n.trim();saveDB();renderPanel();}}));
     p.querySelectorAll('[data-history-play]').forEach(b=>b.addEventListener('click',()=>{const id=b.dataset.historyPlay;const s=db.series.find(x=>x.episodes.some(e=>e.id===id));const e=s?.episodes.find(x=>x.id===id);if(s&&e)openEpisode(s,e);else location.href=urlFor(id);}));
     p.querySelector('#yst2-export')?.addEventListener('click',exportBackup);
@@ -2013,7 +2088,7 @@
       .yst2-series-art>span{position:absolute;bottom:6px;left:7px;z-index:1;padding:3px 6px;border-radius:5px;background:#0d0e12d9;color:#fff;font-size:9px;font-weight:700}
       .yst2-series-art-placeholder{font-size:24px;color:#ff536f}.yst2-series-info{flex:1;min-width:0}
       .yst2-serieshead{gap:4px;margin-bottom:7px}.yst2-seriestitle{font-size:14px;line-height:1.35;font-weight:750;letter-spacing:-.15px}
-      .yst2-serieshead .yst2-icon{width:27px;height:27px;flex:none;padding:0;border:1px solid #353843;color:#b5bac8;font-size:15px;line-height:1}
+      .yst2-new-count{border:1px solid #754052;border-radius:7px;background:#3a202c;color:#ffb2c1;padding:4px 6px;font-size:9px;font-weight:700;white-space:nowrap}.yst2-serieshead .yst2-icon{width:27px;height:27px;flex:none;padding:0;border:1px solid #353843;color:#b5bac8;font-size:15px;line-height:1}
       .yst2-serieshead .yst2-icon.danger{color:#f18b9e}.yst2-muted{color:#999eac;font-size:10px;line-height:1.5}.yst2-dot{padding:0 3px;color:#666b79}
       .yst2-series-footline{display:flex;align-items:center;justify-content:space-between;gap:7px;font-size:10px;color:#8e94a3}.yst2-progress-label{color:#ffc0cb;font-weight:700}
       .yst2-continue{display:flex;align-items:center;gap:10px;margin-top:10px;padding:9px 10px;border:1px solid #4c2936;background:#2b1b26;color:#fff;border-radius:10px;text-align:left;white-space:normal;overflow:visible;text-overflow:clip}
@@ -2119,6 +2194,8 @@
         if(s && Date.now()-last>15*60*1000){sessionStorage.setItem(AUTO_SYNC_KEY,String(Date.now()));syncCurrentPlaylist();}
       }
       if(location.pathname.startsWith('/feed/history')&&db.settings.historyScan) scanHistoryPage();
+      if(staleRefreshTimer)clearTimeout(staleRefreshTimer);
+      staleRefreshTimer=setTimeout(refreshStaleSeries,1200);
     },450);
   }
   function observeSidebar() {
