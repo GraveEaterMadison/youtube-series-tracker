@@ -259,7 +259,7 @@
   function setState(id, patch, persist = true) {
     const old = stateFor(id);
     const next = { ...old, ...patch, updatedAt: Date.now() };
-    if (patch.watched === true && !old.watched) next.lastWatchedAt = Date.now();
+    if (patch.watched === true && !isWatched(id)) next.lastWatchedAt = Date.now();
     db.episodes[id] = next;
     if (persist) saveDB();
   }
@@ -1198,7 +1198,13 @@
       const matches = episodes.filter(ep => ep.id === series.cursorVideoId);
       const exact = matches.find(ep => ep.order === series.cursorOrder);
       const sameRevision = Number(series.cursorRevision || 0) === Number(series.catalogRevision || 0);
-      if (exact && sameRevision) {
+      if (exact) {
+        if (!sameRevision) {
+          series.cursorRevision = Number(series.catalogRevision) || 0;
+          series.recoveryRequired = false;
+          series.recoveryVideoId = '';
+          saveDB();
+        }
         if (!isWatched(exact.id)) return { kind: 'RESUME', episode: exact, position: stateFor(exact.id).position || 0 };
         const next = episodes.find(ep => ep.order > exact.order && !isWatched(ep.id));
         return next ? { kind: 'NEXT', episode: next, position: stateFor(next.id).position || 0 }
@@ -1282,6 +1288,7 @@
   }
   function setSeriesStartHere(series, episode) {
     if (!series || !episode || episode.available === false || episode.unavailable || !/^[A-Za-z0-9_-]{11}$/.test(episode.id)) return false;
+    rememberDatabaseUndo('set start episode');
     series.startHereVideoId = episode.id;
     series.startHereOrder = Number.isInteger(episode.order) ? episode.order : -1;
     series.cursorVideoId = episode.id;
@@ -1694,7 +1701,7 @@
     p.querySelectorAll('[data-through]').forEach(b=>b.addEventListener('click',()=>{const series=db.series.find(item=>item.id===b.dataset.sid);const ep=series?.episodes.find(item=>item.id===b.dataset.through&&item.order===Number(b.dataset.order));if(series&&ep)markThrough(series,ep);}));
     p.querySelectorAll('[data-start-here]').forEach(b=>b.addEventListener('click',()=>{const series=db.series.find(item=>item.id===b.dataset.sid);const ep=series?.episodes.find(item=>item.id===b.dataset.startHere&&item.order===Number(b.dataset.order));if(series&&ep)setSeriesStartHere(series,ep);}));
     p.querySelector('#yst2-undo')?.addEventListener('click',undoLastChange);
-    p.querySelectorAll('[data-remove]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.remove);if(s&&confirm(`Remove “${s.title}” from the library? Progress will be retained for videos that appear in other series.`)){db.series=db.series.filter(x=>x.id!==s.id);saveDB();renderPanel();}}));
+    p.querySelectorAll('[data-remove]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.remove);if(s&&confirm(`Remove “${s.title}” from the library? You can undo for 8 seconds.`)){rememberDatabaseUndo('remove series');db.series=db.series.filter(x=>x.id!==s.id);saveDB();renderPanel();toast('Series removed. Undo is available for 8 seconds.');}}));
     p.querySelectorAll('[data-sync]').forEach(b=>b.addEventListener('click',async()=>{await refreshSeries(b.dataset.sync,false);}));
     p.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.edit);if(!s)return;const n=prompt('Series name',s.title);if(n?.trim()){s.title=n.trim();saveDB();renderPanel();}}));
     p.querySelectorAll('[data-history-play]').forEach(b=>b.addEventListener('click',()=>{const id=b.dataset.historyPlay;const s=db.series.find(x=>x.episodes.some(e=>e.id===id));const e=s?.episodes.find(x=>x.id===id);if(s&&e)openEpisode(s,e);else location.href=urlFor(id);}));
@@ -2060,16 +2067,19 @@
     const position = Number.isFinite(video && video.currentTime) && video.currentTime > 0 ? video.currentTime : old.position || 0;
     const threshold = Number(db.settings.watchedThreshold);
     const watched = old.completionOverride === 'WATCHED' || (old.completionOverride !== 'UNWATCHED' && (old.watched || shouldAutoComplete(position,duration,threshold,Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS),Boolean(video && video.ended))));
-    setState(videoId, {
-      title: episode.title || old.title,
-      position: watched ? (duration || position) : position,
-      duration: duration || old.duration,
-      watched
-    }, false);
+    if (db.settings.recordPlaybackProgress !== false) {
+      setState(videoId, {
+        title: episode.title || old.title,
+        position: watched ? (duration || position) : position,
+        duration: duration || old.duration,
+        watched
+      }, false);
+      db.history[videoId] = { title: episode.title || old.title, lastSeen: Date.now() };
+    }
     series.cursorVideoId = videoId;
     series.cursorOrder = episode.order;
     series.cursorUpdatedAt = Date.now();
-    db.history[videoId] = { title: episode.title || old.title, lastSeen: Date.now() };
+    series.cursorRevision = Number(series.catalogRevision) || 0;
   }
   function showFollowSetupDialog(candidate, videoId) {
     if (!candidate || getVideoId() !== videoId) return;
@@ -2078,7 +2088,8 @@
     panel.querySelector('#yst2-follow-setup')?.remove();
     const catalog = [...candidate.items].sort((a,b)=>(a.order??0)-(b.order??0));
     const reverseDefault = typeof candidate.reverse === 'boolean' ? candidate.reverse : inferReverseOrder(catalog);
-    const index = catalog.findIndex(ep => ep.id === videoId && ep.available !== false && !ep.unavailable);
+    const requestedOrder = candidate.id === getPlaylistId() ? currentPlaylistIndex() : -1;
+    const index = catalog.findIndex(ep => ep.id === videoId && ep.available !== false && !ep.unavailable && (requestedOrder < 0 || ep.order === requestedOrder));
     if (index < 0) { toast('The selected playlist does not contain the current video.'); return; }
     const previousCount = reverseDefault ? catalog.length - index - 1 : index;
     const video = document.querySelector('video');
@@ -2123,7 +2134,8 @@
     series.playbackReverse = reverse;
     const ordered = [...series.episodes].sort((a,b)=>(a.order??0)-(b.order??0));
     if (reverse) ordered.reverse();
-    const startIndex = ordered.findIndex(ep=>ep.id===videoId&&ep.available!==false&&!ep.unavailable);
+    const requestedOrder = candidate.id===getPlaylistId()?currentPlaylistIndex():-1;
+    const startIndex = ordered.findIndex(ep=>ep.id===videoId&&ep.available!==false&&!ep.unavailable&&(requestedOrder<0||ep.order===requestedOrder));
     if (options.watchPrevious && startIndex>0) {
       const preceding=ordered.slice(0,startIndex).filter(ep=>ep.available!==false&&!ep.unavailable&&/^[A-Za-z0-9_-]{11}$/.test(ep.id));
       rememberUndo(preceding.map(ep=>ep.id),'follow series and mark previous episodes watched');
