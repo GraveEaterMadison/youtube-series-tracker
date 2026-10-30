@@ -94,6 +94,7 @@
         newEpisodeIds: Array.isArray(item.newEpisodeIds) ? item.newEpisodeIds.filter(id => /^[A-Za-z0-9_-]{11}$/.test(id)) : [],
         startHereVideoId: /^[A-Za-z0-9_-]{11}$/.test(String(item.startHereVideoId || '')) ? item.startHereVideoId : '',
         bookmarkVideoId: /^[A-Za-z0-9_-]{11}$/.test(String(item.bookmarkVideoId || '')) ? item.bookmarkVideoId : '',
+        bookmarkVideoId: /^[A-Za-z0-9_-]{11}$/.test(String(item.bookmarkVideoId || '')) ? item.bookmarkVideoId : '',
         startHereOrder: Number.isInteger(item.startHereOrder) ? item.startHereOrder : -1,
         lastRefreshAttemptAt: Number(item.lastRefreshAttemptAt) || 0,
         refreshRetryAt: Number(item.refreshRetryAt) || 0,
@@ -1798,7 +1799,7 @@
       </section>
       <section class="yst2-toolbar" aria-label="Tracker actions">
         <div class="yst2-primary-actions"><button id="yst2-add-current" class="yst2-mainbtn"><span aria-hidden="true">＋</span> Add video</button><button id="yst2-sync" class="yst2-subbtn"><span aria-hidden="true">↻</span> Sync playlist</button><button id="yst2-follow-playlist" class="yst2-subbtn">Follow link</button></div>
-        <div class="yst2-data-actions"><button id="yst2-export" class="yst2-icon" title="Export backup" aria-label="Export backup">⇩</button><button id="yst2-import" class="yst2-icon" title="Import backup" aria-label="Import backup">⇧</button></div>
+        <div class="yst2-data-actions"><button id="yst2-export" class="yst2-icon" title="Export full tracker backup" aria-label="Export full tracker backup">⇩</button><button id="yst2-export-morphe" class="yst2-icon" title="Export Morphe-compatible backup" aria-label="Export Morphe-compatible backup">M</button><button id="yst2-import" class="yst2-icon" title="Import or merge backup" aria-label="Import or merge backup">⇧</button></div>
       </section>
       <nav class="yst2-tabs" role="tablist" aria-label="Tracker sections">${tabs.map(([k,v,count])=>`<button role="tab" data-tab="${k}" aria-selected="${activeTab===k?'true':'false'}" class="${activeTab===k?'active':''}"><span>${v}</span>${count===null?'':`<span class="yst2-tab-count">${count}</span>`}</button>`).join('')}</nav>
       ${activeTab === 'settings' ? '' : `<div class="yst2-searchwrap"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"></circle><path d="m16 16 5 5"></path></svg><input id="yst2-search" type="search" value="${esc(librarySearch)}" placeholder="${activeTab==='history'?'Search history matches':'Search series and episodes'}" aria-label="Search ${activeTab==='history'?'history matches':'series and episodes'}"><kbd>⌕</kbd></div>`}
@@ -1904,6 +1905,7 @@
     p.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.edit);if(!s)return;const n=prompt('Series name',s.title);if(n?.trim()){s.title=n.trim();saveDB();renderPanel();}}));
     p.querySelectorAll('[data-history-play]').forEach(b=>b.addEventListener('click',()=>{const id=b.dataset.historyPlay;const s=db.series.find(x=>x.episodes.some(e=>e.id===id));const e=s?.episodes.find(x=>x.id===id);if(s&&e)openEpisode(s,e);else location.href=urlFor(id);}));
     p.querySelector('#yst2-export')?.addEventListener('click',exportBackup);
+    p.querySelector('#yst2-export-morphe')?.addEventListener('click',exportMorpheBackup);
     p.querySelector('#yst2-import')?.addEventListener('click',importBackup);
     p.querySelector('#yst2-enabled')?.addEventListener('change',e=>{db.settings.enabled=e.target.checked;saveDB();if(!e.target.checked){if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;}activePlaybackSession=null;currentVideoId='';activeVideo=null;addSidebarButton();addPlayerButton();addPlaylistFollowButton();toast('Series Tracker disabled. Your saved data is kept.');}else{ensureUI();trackCurrentVideo();toast('Series Tracker enabled.');}});
     p.querySelector('#yst2-threshold')?.addEventListener('change',e=>{db.settings.watchedThreshold=Number(e.target.value);saveDB();});
@@ -1923,11 +1925,65 @@
     p.querySelector('#yst2-markall')?.addEventListener('click',()=>{const s=findSeries(getPlaylistId());if(!s){toast('Open a tracked series playlist first.');return;}const playable=s.episodes.filter(e=>e.available!==false&&!e.unavailable&&/^[A-Za-z0-9_-]{11}$/.test(e.id));if(confirm(`Mark all ${playable.length} playable episodes watched?`)){rememberUndo(playable.map(e=>e.id),'mark all episodes watched');const now=Date.now();for(const e of playable){const old=stateFor(e.id);const already=isWatched(e.id);db.episodes[e.id]={...old,watched:true,completionOverride:'WATCHED',position:old.duration||e.duration||old.position,duration:old.duration||e.duration||0,updatedAt:now,lastWatchedAt:already?old.lastWatchedAt:now};}saveDB();renderPanel();toast('All playable episodes marked watched.');}});
     p.querySelector('#yst2-scanhistory')?.addEventListener('click',scanHistoryPage);
   }
+  function adaptMorpheBackup(document) {
+    if (!document || document.format !== 'series-tracker' || document.version !== 1
+        || !Array.isArray(document.series) || !document.progress
+        || typeof document.progress !== 'object' || Array.isArray(document.progress)) throw new Error('Unsupported Morphe Series Tracker backup format.');
+    if (document.series.length > MAX_BACKUP_SERIES || Object.keys(document.progress).length > MAX_BACKUP_EPISODES) throw new Error('Morphe backup exceeds tracker limits.');
+    const series=[], episodes={}, referenced=new Set(), seenSeries=new Set();
+    for(const row of document.series){
+      if(!row||typeof row!=='object'||Array.isArray(row)||!Array.isArray(row.episodes))throw new Error('Invalid Morphe series record.');
+      const id=String(row.id||'');
+      if(!/^[A-Za-z0-9_-]{2,128}$/.test(id)||seenSeries.has(id))throw new Error('Invalid or duplicate Morphe series ID.');
+      seenSeries.add(id);
+      if(row.episodes.length>MAX_BACKUP_EPISODES)throw new Error('Morphe series has too many episodes.');
+      const occurrenceKeys=new Set();
+      const mappedEpisodes=row.episodes.map((ep,index)=>{
+        if(!ep||typeof ep!=='object'||Array.isArray(ep))throw new Error('Invalid Morphe episode.');
+        const ordinal=Number.isInteger(ep.ordinal)&&ep.ordinal>0?ep.ordinal:index+1;
+        const order=ordinal-1;
+        const rawId=String(ep.id||''),validId=/^[A-Za-z0-9_-]{11}$/.test(rawId);
+        const videoId=validId?rawId:'__yst_unavailable__'+id.slice(0,80)+'_'+order;
+        if(occurrenceKeys.has(videoId+':'+order))throw new Error('Duplicate Morphe episode occurrence.');
+        occurrenceKeys.add(videoId+':'+order);
+        if(validId)referenced.add(videoId);
+        const durationMs=Number(ep.duration)||0;
+        if(!Number.isFinite(durationMs)||durationMs<0||durationMs>604800000)throw new Error('Invalid Morphe episode duration.');
+        return {id:videoId,title:String(ep.title||'').slice(0,500),duration:durationMs/1000,order,
+          available:Boolean(ep.available&&validId),unavailable:!(ep.available&&validId),manuallyAdded:false,
+          videoInfo:String(ep.info||'').slice(0,240),thumb:validId?'https://i.ytimg.com/vi/'+rawId+'/hqdefault.jpg':'',
+          url:validId?'https://www.youtube.com/watch?v='+rawId:''};
+      });
+      const cursor=/^[A-Za-z0-9_-]{11}$/.test(String(row.cursor||''))?row.cursor:'';
+      const bookmark=/^[A-Za-z0-9_-]{11}$/.test(String(row.bookmark||''))?row.bookmark:'';
+      const recovery=/^[A-Za-z0-9_-]{11}$/.test(String(row.recovery||''))?row.recovery:'';
+      if(cursor)referenced.add(cursor);if(bookmark)referenced.add(bookmark);
+      series.push({id,playlistId:row.complete?id:null,manual:!row.complete,
+        title:String(row.name||'Imported series').trim().slice(0,500)||'Imported series',
+        episodes:mappedEpisodes,addedAt:Math.max(0,Number(row.activity)||Date.now()),
+        updatedAt:Math.max(0,Number(row.activity)||Date.now()),lastSyncedAt:Math.max(0,Number(row.fetchedAt)||0),
+        playbackReverse:Boolean(row.reverse),hideWatched:Boolean(row.hideWatched),cursorVideoId:cursor,
+        cursorOrder:Number.isInteger(row.ordinal)&&row.ordinal>0?row.ordinal-1:-1,
+        cursorUpdatedAt:Math.max(0,Number(row.activity)||0),catalogRevision:row.complete?1:0,
+        cursorRevision:row.cursorValid?(row.complete?1:0):-1,startHereVideoId:row.startHere?cursor:'',
+        startHereOrder:row.startHere&&Number.isInteger(row.ordinal)&&row.ordinal>0?row.ordinal-1:-1,
+        bookmarkVideoId:bookmark,recoveryVideoId:recovery});
+    }
+    for(const id of referenced){
+      const p=document.progress[id];if(!p||typeof p!=='object'||Array.isArray(p))continue;
+      const durationMs=Number(p.duration)||0,positionMs=Number(p.position)||0;
+      if(!Number.isFinite(durationMs)||!Number.isFinite(positionMs)||durationMs<0||durationMs>604800000||positionMs<0||positionMs>604800000)throw new Error('Invalid Morphe progress record.');
+      const override=['AUTO','WATCHED','UNWATCHED'].includes(p.override)?p.override:'AUTO';
+      episodes[id]={watched:override==='WATCHED'||(override==='AUTO'&&Boolean(p.completed)),completionOverride:override,
+        position:Math.min(positionMs/1000,durationMs>0?durationMs/1000:positionMs/1000),duration:durationMs/1000,title:'',
+        updatedAt:Math.max(0,Number(p.playedAt)||0),lastWatchedAt:Math.max(0,Number(p.playedAt)||0)};
+    }
+    return {series,episodes,history:{},settings:{},lastSync:0};
+  }
   function validateBackupDocument(document) {
     if (!document || typeof document !== 'object' || Array.isArray(document)) throw new Error('Backup must be a JSON object.');
-    const raw = document.data && document.format === 'youtube-series-tracker'
-      ? document.data
-      : document;
+    const raw = document.format === 'series-tracker' ? adaptMorpheBackup(document)
+      : document.data && document.format === 'youtube-series-tracker' ? document.data : document;
     if (!raw || typeof raw !== 'object' || !Array.isArray(raw.series)
         || !raw.episodes || typeof raw.episodes !== 'object' || Array.isArray(raw.episodes)) {
       throw new Error('Backup does not contain a series list and progress map.');
@@ -2049,37 +2105,84 @@
     const blob = new Blob([JSON.stringify(document,null,2)],{type:'application/json'});
     const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download='youtube-series-backup.json';a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);
   }
+  function exportMorpheBackup() {
+    const series=db.series.map(row=>({
+      id:String(row.id),name:String(row.title||'Series'),
+      complete:Boolean((row.playlistId||(row.episodes||[]).length)&&(row.episodes||[]).length),
+      reverse:Boolean(row.playbackReverse),hideWatched:Boolean(row.hideWatched),
+      cursor:/^[A-Za-z0-9_-]{11}$/.test(String(row.cursorVideoId||''))?row.cursorVideoId:'',
+      ordinal:Number.isInteger(row.cursorOrder)&&row.cursorOrder>=0?row.cursorOrder+1:-1,
+      cursorValid:Number(row.cursorRevision)===Number(row.catalogRevision),
+      bookmark:/^[A-Za-z0-9_-]{11}$/.test(String(row.bookmarkVideoId||''))?row.bookmarkVideoId:'',
+      startHere:Boolean(row.startHereVideoId),fetchedAt:Math.max(0,Number(row.lastSyncedAt)||0),
+      activity:Math.max(0,Number(row.updatedAt)||0),
+      recovery:/^[A-Za-z0-9_-]{11}$/.test(String(row.recoveryVideoId||''))?row.recoveryVideoId:'',
+      episodes:(row.episodes||[]).map((ep,index)=>({
+        ordinal:(Number.isInteger(ep.order)&&ep.order>=0?ep.order:index)+1,
+        id:/^[A-Za-z0-9_-]{11}$/.test(String(ep.id||''))?ep.id:'',
+        title:String(ep.title||''),info:String(ep.videoInfo||''),
+        duration:Math.round((Number(ep.duration)||0)*1000),
+        available:ep.available!==false&&!ep.unavailable&&/^[A-Za-z0-9_-]{11}$/.test(String(ep.id||''))
+      }))
+    }));
+    const references=new Set();
+    for(const row of db.series){
+      for(const ep of row.episodes||[])if(/^[A-Za-z0-9_-]{11}$/.test(String(ep.id||'')))references.add(ep.id);
+      for(const id of [row.cursorVideoId,row.bookmarkVideoId])if(/^[A-Za-z0-9_-]{11}$/.test(String(id||'')))references.add(id);
+    }
+    const progress={};
+    for(const id of references){
+      const state=stateFor(id);
+      progress[id]={position:Math.round((Number(state.position)||0)*1000),duration:Math.round((Number(state.duration)||0)*1000),
+        completed:Boolean(state.watched&&state.completionOverride==='AUTO'),
+        override:['AUTO','WATCHED','UNWATCHED'].includes(state.completionOverride)?state.completionOverride:'AUTO',
+        playedAt:Math.max(0,Number(state.updatedAt)||0)};
+    }
+    const backup={format:'series-tracker',version:1,series,progress};
+    if(JSON.stringify(backup).length>MAX_BACKUP_CHARS){toast('Morphe-compatible backup exceeds the 8 MB limit.');return;}
+    const blob=new Blob([JSON.stringify(backup,null,2)],{type:'application/json'});
+    const url=URL.createObjectURL(blob),anchor=document.createElement('a');
+    anchor.href=url;anchor.download='series-tracker-morphe-compatible.json';anchor.click();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+    toast('Morphe-compatible library backup exported.');
+  }
   function importBackup() {
     const input=document.createElement('input');input.type='file';input.accept='.json,application/json';
     input.onchange=async()=>{
-      try {
-        if (!input.files || !input.files[0]) return;
-        if (input.files[0].size > MAX_BACKUP_CHARS) throw new Error('Backup exceeds the 8 MB size limit.');
-        const parsed = JSON.parse(await input.files[0].text());
-        const restored = validateBackupDocument(parsed);
-        const existingIds = new Set(db.series.map(series => series.id));
-        const overlap = restored.series.filter(series => existingIds.has(series.id)).length;
-        const episodeCount = restored.series.reduce((count,series) => count + series.episodes.length,0);
-        const progressCount = Object.keys(restored.episodes).length;
-        const preview = 'Backup preview\n'
-          + restored.series.length + ' series\n'
-          + episodeCount + ' episode entries\n'
-          + progressCount + ' progress records\n'
-          + overlap + ' series will replace existing entries.\n\n'
-          + 'Restore this backup? Current data will be replaced.';
-        if (!confirm(preview)) return;
-        rememberDatabaseUndo('restore backup');
-        db = restored;
-        saveDB();
-        renderPanel();
-        toast('Backup restored and validated. Undo is available for 8 seconds.');
-      } catch(error) {
-        console.warn('[YouTube Series] Backup import rejected:', error?.message || error);
-        toast('Could not import backup: ' + (error?.message || 'invalid file'));
+      try{
+        if(!input.files||!input.files[0])return;
+        if(input.files[0].size>MAX_BACKUP_CHARS)throw new Error('Backup exceeds the 8 MB size limit.');
+        const restored=validateBackupDocument(JSON.parse(await input.files[0].text()));
+        const existingIds=new Set(db.series.map(series=>series.id));
+        const missingSeries=restored.series.filter(series=>!existingIds.has(series.id));
+        const overlap=restored.series.length-missingSeries.length;
+        const episodeCount=restored.series.reduce((n,series)=>n+series.episodes.length,0);
+        const progressCount=Object.keys(restored.episodes).length;
+        const preview=['Backup preview',restored.series.length+' series',episodeCount+' episode entries',
+          progressCount+' progress records',overlap+' existing series will be left unchanged',
+          missingSeries.length+' new series will be added','','Merge only missing series and preserve existing progress?'].join('\n');
+        if(!confirm(preview))return;
+        if(!missingSeries.length){toast('No new series to import. Existing series and progress were left unchanged.');return;}
+        rememberDatabaseUndo('merge backup');
+        db.series.push(...missingSeries);
+        const newVideoIds=new Set();
+        for(const series of missingSeries){
+          for(const ep of series.episodes)if(/^[A-Za-z0-9_-]{11}$/.test(ep.id))newVideoIds.add(ep.id);
+          for(const id of [series.cursorVideoId,series.bookmarkVideoId])if(/^[A-Za-z0-9_-]{11}$/.test(String(id||'')))newVideoIds.add(id);
+        }
+        for(const [id,state] of Object.entries(restored.episodes||{}))if(newVideoIds.has(id)&&!Object.prototype.hasOwnProperty.call(db.episodes,id))db.episodes[id]={...state};
+        for(const [id,item] of Object.entries(restored.history||{}))if(!Object.prototype.hasOwnProperty.call(db.history,id))db.history[id]={...item};
+        db.lastSync=Math.max(Number(db.lastSync)||0,Number(restored.lastSync)||0);
+        saveDB();renderPanel();
+        toast('Imported '+missingSeries.length+' new series. Existing series and progress were preserved. Undo is available for 8 seconds.');
+      }catch(error){
+        console.warn('[YouTube Series] Backup import rejected:',error?.message||error);
+        toast('Could not import backup: '+(error?.message||'invalid file'));
       }
     };
     input.click();
   }
+
   function historyProgressPercent(node) {
     if (!node) return null;
     const selectors = [
