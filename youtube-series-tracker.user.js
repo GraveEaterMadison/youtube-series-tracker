@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Series Tracker
 // @namespace    https://github.com/GraveEaterMadison/youtube-series-tracker
-// @version      2.5.0
+// @version      2.5.1
 // @description  Build YouTube series from playlists or add individual videos, with automatic default series names, local progress, watched status, history matching, and optional auto-next.
 // @author       Zero
 // @license      MIT
@@ -1027,6 +1027,10 @@
   function chooseContinue(s) {
     const eps = orderedEpisodes(s).filter(e =>
       e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
+    const startHere = s && s.startHereVideoId
+      ? eps.find(e => e.id === s.startHereVideoId && (!Number.isInteger(s.startHereOrder) || e.order === s.startHereOrder))
+      : null;
+    if (startHere) return startHere;
     const cursorIndex = s && s.cursorVideoId
       ? eps.findIndex(e => e.id === s.cursorVideoId && (!Number.isInteger(s.cursorOrder) || e.order === s.cursorOrder))
       : -1;
@@ -1052,11 +1056,25 @@
   function openEpisode(s, e, resume = true) {
     if (!s || !e || e.unavailable || e.available === false || !/^[A-Za-z0-9_-]{11}$/.test(e.id)) return;
     const st = stateFor(e.id);
+    const startsHere = s.startHereVideoId === e.id && (!Number.isInteger(s.startHereOrder) || s.startHereOrder === e.order);
+    if (startsHere) { s.startHereVideoId = ''; s.startHereOrder = -1; }
     s.cursorVideoId = e.id;
     s.cursorOrder = Number.isInteger(e.order) ? e.order : undefined;
     s.cursorUpdatedAt = Date.now();
     saveDB();
-    location.href = urlFor(e.id, s.playlistId, s.playlistId ? e.order : undefined, resume && !isWatched(e.id) ? st.position : 0);
+    location.href = urlFor(e.id, s.playlistId, s.playlistId ? e.order : undefined, resume && !startsHere && !isWatched(e.id) ? st.position : 0);
+  }
+  function setSeriesStartHere(series, episode) {
+    if (!series || !episode || episode.available === false || episode.unavailable || !/^[A-Za-z0-9_-]{11}$/.test(episode.id)) return false;
+    series.startHereVideoId = episode.id;
+    series.startHereOrder = Number.isInteger(episode.order) ? episode.order : -1;
+    series.cursorVideoId = episode.id;
+    series.cursorOrder = series.startHereOrder;
+    series.cursorUpdatedAt = Date.now();
+    saveDB();
+    renderPanel();
+    toast('Continue watching will start here: ' + (episode.title || 'selected episode'));
+    return true;
   }
   function markEpisode(id, watched) {
     if (!/^[A-Za-z0-9_-]{11}$/.test(id)) return;
@@ -1081,6 +1099,7 @@
       + '<div class="yst2-bar"><i style="width:' + p + '%"></i></div></div>'
       + '<button class="yst2-mark ' + (watched ? 'checked' : '') + '" data-mark="' + esc(e.id) + '" title="' + (watched ? 'Mark unwatched' : 'Mark watched') + '"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>' + (watched ? '✓' : '○') + '</button>'
       + '<button class="yst2-through" data-through="' + esc(e.id) + '" data-sid="' + esc(s.id) + '" title="Mark watched through this episode" aria-label="Mark watched through this episode"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>⇢</button>'
+      + '<button class="yst2-start-here" data-start-here="' + esc(e.id) + '" data-sid="' + esc(s.id) + '" title="Continue this series from this episode" aria-label="Continue this series from this episode"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>↳</button>'
       + '</article>';
   }
   function saveVideoToSeries(series, meta) {
@@ -1209,6 +1228,7 @@
       + '<div class="yst2-series-info"><header class="yst2-serieshead">'
       + '<div class="yst2-seriestitle">' + esc(s.title) + '</div>'
       + (s.playlistId ? '<button class="yst2-icon" data-sync="' + esc(s.id) + '" title="Refresh entire playlist" aria-label="Refresh ' + esc(s.title) + '">↻</button>' : '<span class="yst2-manual-label">Manual</span>')
+      + '<button class="yst2-icon" data-hide-watched="' + esc(s.id) + '" title="' + (s.hideWatched ? 'Show watched episodes' : 'Hide watched episodes') + '" aria-label="' + (s.hideWatched ? 'Show watched episodes' : 'Hide watched episodes') + '">' + (s.hideWatched ? '◉' : '◌') + '</button>'
       + '<button class="yst2-icon" data-order="' + esc(s.id) + '" title="' + (s.playbackReverse ? 'Use playlist order' : 'Use chronological episode order') + '" aria-label="Change episode order">⇅</button>'
       + '<button class="yst2-icon" data-edit="' + esc(s.id) + '" title="Rename series" aria-label="Rename ' + esc(s.title) + '">✎</button>'
       + '<button class="yst2-icon danger" data-remove="' + esc(s.id) + '" title="Remove series" aria-label="Remove ' + esc(s.title) + '">×</button>'
@@ -1232,14 +1252,21 @@
     });
     const mark = article.querySelector('[data-mark]');
     mark?.addEventListener('click', () => {
-      if (mark.disabled) return;
-      markEpisode(mark.dataset.mark, !isWatched(mark.dataset.mark));
+      if (!mark.disabled) markEpisode(mark.dataset.mark, !isWatched(mark.dataset.mark));
+    });
     const through = article.querySelector('[data-through]');
     through?.addEventListener('click', () => {
+      if (through.disabled) return;
       const series = db.series.find(item => item.id === through.dataset.sid);
-      const episode = series?.episodes.find(item => item.id === through.dataset.through);
+      const episode = series?.episodes.find(item => item.id === through.dataset.through && item.order === Number(article.querySelector('[data-play]')?.dataset.order || item.order));
       if (series && episode) markThrough(series, episode);
     });
+    const start = article.querySelector('[data-start-here]');
+    start?.addEventListener('click', () => {
+      if (start.disabled) return;
+      const series = db.series.find(item => item.id === start.dataset.sid);
+      const episode = series?.episodes.find(item => item.id === start.dataset.startHere);
+      if (series && episode) setSeriesStartHere(series, episode);
     });
   }
 
@@ -1248,7 +1275,7 @@
     const list = details.querySelector('[data-episode-list]');
     const more = details.querySelector('[data-load-more]');
     if (!series || !list || !more) return;
-    const episodes = orderedEpisodes(series);
+    const episodes = orderedEpisodes(series).filter(episode => !series.hideWatched || !isWatched(episode.id));
     const offset = list.children.length;
     if (offset >= episodes.length) {
       more.hidden = true;
@@ -1344,6 +1371,7 @@
       <label class="yst2-setting">Complete when this much time remains <select id="yst2-remaining">${[[0,'Disabled'],[15,'15 seconds'],[30,'30 seconds'],[60,'1 minute'],[90,'90 seconds']].map(([v,l])=>`<option value="${v}" ${Number(s.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS)===v?'selected':''}>${l}</option>`).join('')}</select></label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-autonext" ${s.autoNext?'checked':''}> Automatically play the next unwatched episode when a tracked episode ends</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-autosync" ${s.autoSyncOnOpen?'checked':''}> Automatically refresh the current tracked playlist when opened</label>
+      <label class="yst2-setting"><input type="checkbox" id="yst2-sidebar" ${s.showSidebarButton!==false?'checked':''}> Show Series in YouTube navigation</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-historyscan" ${s.historyScan?'checked':''}> Match YouTube History page videos to known episodes</label>
       <p class="yst2-muted">Progress is stored in this Firefox profile on YouTube. It does not sync to Morphe or your Google account. You can export a backup at any time.</p>
       <button id="yst2-clear" class="yst2-subbtn dangerbtn">Delete all series and progress</button></section>
@@ -1391,6 +1419,7 @@
     });
     p.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>{activeTab=b.dataset.tab;renderPanel();if(activeTab==='history')scanHistoryPage();}));
     p.querySelectorAll('[data-play]').forEach(b=>b.addEventListener('click',()=>{if(b.disabled)return;const s=db.series.find(x=>x.id===b.dataset.sid),e=s?.episodes.find(x=>x.id===b.dataset.play);if(s&&e)openEpisode(s,e);}));
+    p.querySelectorAll('[data-hide-watched]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.hideWatched);if(!s)return;s.hideWatched=!s.hideWatched;saveDB();renderPanel();toast(s.hideWatched?'Watched episodes hidden.':'Watched episodes shown.');}));
     p.querySelectorAll('[data-order]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.order);if(!s)return;s.playbackReverse=!s.playbackReverse;saveDB();renderPanel();toast('Episode order: '+(s.playbackReverse?'chronological':'playlist')+'.');}));
     p.querySelectorAll('[data-continue]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.continue);if(s)openEpisode(s,chooseContinue(s));}));
     p.querySelectorAll('[data-mark]').forEach(b=>b.addEventListener('click',()=>{const id=b.dataset.mark;markEpisode(id,!isWatched(id));}));
@@ -1407,6 +1436,7 @@
     p.querySelector('#yst2-autonext')?.addEventListener('change',e=>{db.settings.autoNext=e.target.checked;saveDB();});
     p.querySelector('#yst2-autosync')?.addEventListener('change',e=>{db.settings.autoSyncOnOpen=e.target.checked;saveDB();});
     p.querySelector('#yst2-historyscan')?.addEventListener('change',e=>{db.settings.historyScan=e.target.checked;saveDB();});
+    p.querySelector('#yst2-sidebar')?.addEventListener('change',e=>{db.settings.showSidebarButton=e.target.checked;saveDB();addSidebarButton();});
     p.querySelector('#yst2-clear')?.addEventListener('click',()=>{if(confirm('Permanently delete all series, episode progress, and history matches? Export a backup first if needed.')){db=emptyDB();saveDB();renderPanel();toast('Tracker data deleted.');}});
     p.querySelector('#yst2-recount')?.addEventListener('click',()=>{rememberUndo(Object.keys(db.episodes),'recalculate completion');for(const [id,st] of Object.entries(db.episodes)){setState(id,{watched:shouldAutoComplete(st.position,st.duration,Number(db.settings.watchedThreshold),Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS)),completionOverride:'AUTO'},false);}saveDB();renderPanel();toast('Automatic completion recalculated.');});
     p.querySelector('#yst2-markall')?.addEventListener('click',()=>{const s=findSeries(getPlaylistId());if(!s){toast('Open a tracked series playlist first.');return;}const playable=s.episodes.filter(e=>e.available!==false&&!e.unavailable&&/^[A-Za-z0-9_-]{11}$/.test(e.id));if(confirm(`Mark all ${playable.length} playable episodes watched?`)){rememberUndo(playable.map(e=>e.id),'mark all episodes watched');const now=Date.now();for(const e of playable){const old=stateFor(e.id);const already=isWatched(e.id);db.episodes[e.id]={...old,watched:true,completionOverride:'WATCHED',position:old.duration||e.duration||old.position,duration:old.duration||e.duration||0,updatedAt:now,lastWatchedAt:already?old.lastWatchedAt:now};}saveDB();renderPanel();toast('All playable episodes marked watched.');}});
@@ -1438,6 +1468,11 @@
   }
   function addSidebarButton() {
     let button = document.getElementById(BTN);
+    if (db.settings.showSidebarButton === false) {
+      button?.remove();
+      document.getElementById('yst2-sidebar-wrap')?.remove();
+      return;
+    }
     if (!button) {
       button = document.createElement('button');
       button.id = BTN;
@@ -1749,7 +1784,7 @@
       .yst2-continue span{font-weight:400;color:#ffc0cb}.yst2-done{color:#65d6a1;padding:9px 0}.yst2-details{margin-top:9px}.yst2-details summary{cursor:pointer;color:#ddd;padding:5px 0;font-size:12px}.yst2-details summary span{color:#999;margin-left:5px}
       .yst2-ep{display:flex;align-items:center;gap:9px;padding:9px 0;border-bottom:1px solid #292a30}.yst2-thumb{width:86px;aspect-ratio:16/9;object-fit:cover;border-radius:6px;background:#292a30}.yst2-epbody{flex:1;min-width:0}
       .yst2-epname{display:block;background:none;border:0;color:#eee;text-align:left;padding:0;font-weight:650;font-size:12px;line-height:1.4;max-height:2.8em;overflow:hidden}.yst2-epbody .yst2-muted{margin-top:4px}.yst2-epbody .yst2-bar{margin-top:5px}
-      .yst2-mark{background:none;border:0;color:#aaa;font-size:19px;min-width:28px}.yst2-mark.checked{color:#62d5a0}.yst2-through{border:0;background:transparent;color:#aab0bf;padding:5px 7px;cursor:pointer}.yst2-through:hover{color:#ff8da3}.yst2-through:focus-visible{outline:2px solid #ff6682;outline-offset:2px}.yst2-ep.is-watched .yst2-epname{color:#b5b5bc}
+      .yst2-mark{background:none;border:0;color:#aaa;font-size:19px;min-width:28px}.yst2-mark.checked{color:#62d5a0}.yst2-through,.yst2-start-here{border:0;background:transparent;color:#aab0bf;padding:5px 7px;cursor:pointer}.yst2-through:hover,.yst2-start-here:hover{color:#ff8da3}.yst2-through:focus-visible,.yst2-start-here:focus-visible{outline:2px solid #ff6682;outline-offset:2px}.yst2-ep.is-watched .yst2-epname{color:#b5b5bc}
       .yst2-empty{text-align:center;padding:42px 16px;color:#ddd}.yst2-empty h3{margin:10px 0 5px}.yst2-empty p{color:#a5a6b0;font-size:12px}.yst2-empty .symbol{font-size:38px;color:#ff1744}
       .yst2-setting{display:flex;align-items:center;gap:8px;margin:13px 0;font-size:12px}.yst2-setting select{margin-left:auto;background:#292a31;color:#eee;border:1px solid #444;border-radius:6px;padding:5px}
       .yst2-setting input{accent-color:#ff1744}.dangerbtn{color:#ff8b9b}.yst2-footer{padding:10px 15px;border-top:1px solid #292a30;color:#8d8f99;font-size:10px}
