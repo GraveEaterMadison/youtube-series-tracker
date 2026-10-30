@@ -2040,6 +2040,7 @@
         };
       });
       const cursorVideoId = /^[A-Za-z0-9_-]{11}$/.test(String(row.cursorVideoId || '')) ? row.cursorVideoId : '';
+      const bookmarkVideoId = /^[A-Za-z0-9_-]{11}$/.test(String(row.bookmarkVideoId || '')) ? row.bookmarkVideoId : '';
       const startHereVideoId = /^[A-Za-z0-9_-]{11}$/.test(String(row.startHereVideoId || '')) ? row.startHereVideoId : '';
       const newEpisodeIds = Array.isArray(row.newEpisodeIds) ? [...new Set(row.newEpisodeIds.filter(value => /^[A-Za-z0-9_-]{11}$/.test(value)))].slice(0,10000) : [];
       return {
@@ -2054,6 +2055,7 @@
         playbackReverse: Boolean(row.playbackReverse),
         hideWatched: Boolean(row.hideWatched),
         cursorVideoId,
+        bookmarkVideoId,
         cursorOrder: Number.isInteger(row.cursorOrder) ? row.cursorOrder : -1,
         cursorUpdatedAt: Math.max(0,Number(row.cursorUpdatedAt)||0),
         catalogRevision: Number.isInteger(row.catalogRevision) ? Math.max(0,row.catalogRevision) : (episodes.length ? 1 : 0),
@@ -2233,7 +2235,7 @@
   function addHistorySwitcher() {
     const onHistory = location.pathname.startsWith('/feed/history');
     const existing = document.getElementById('yst2-history-switcher');
-    if (!onHistory) { existing?.remove(); return; }
+    if (db.settings.enabled === false || !onHistory) { existing?.remove(); return; }
     const host = document.querySelector('ytd-browse[page-subtype="history"] #header')
       || document.querySelector('ytd-browse[page-subtype="history"] #primary')
       || document.querySelector('ytd-browse[page-subtype="history"]');
