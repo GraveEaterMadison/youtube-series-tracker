@@ -610,3 +610,29 @@ test('backup preview and local data cleanup have separate controls', () => {
   assert.match(source,/id="yst2-clear-history"/);
   assert.match(source,/formatVersion: 1/);
 });
+
+
+test('resume planner follows playback order when a series is reversed', () => {
+  const orderedEpisodes = vm.runInNewContext('(' + extractSimpleFunction(source, 'orderedEpisodes') + ')');
+  const planner = vm.runInNewContext('(' + extractSimpleFunction(source, 'resumePlan') + ')', {
+    orderedEpisodes,
+    isWatched: id => id === 'aaaaaaaaaaa',
+    stateFor: id => ({watched:id === 'aaaaaaaaaaa',position:0}),
+    saveDB: () => {}
+  });
+  const series = {
+    playbackReverse: true,
+    episodes: [
+      {id:'aaaaaaaaaaa',order:0},
+      {id:'bbbbbbbbbbb',order:1},
+      {id:'ccccccccccc',order:2}
+    ],
+    cursorVideoId:'aaaaaaaaaaa',
+    cursorOrder:0,
+    cursorRevision:1,
+    catalogRevision:1
+  };
+  const result = planner(series);
+  assert.equal(result.kind,'NEXT');
+  assert.equal(result.episode.id,'ccccccccccc');
+});
