@@ -150,7 +150,7 @@ test('playlist refresh and history scan can batch state changes into one write',
   const historyScan = extractSimpleFunction(source, 'scanHistoryPage');
   assert.match(setState, /persist = true/);
   assert.match(mergeSeries, /setState\(ep\.id,\s*\{[^}]+\},\s*false\)/);
-  assert.match(historyScan, /setState\(id,\s*\{watched:true\},\s*false\)/);
+  assert.match(historyScan, /setState\(id,\s*\{watched:true,completionOverride:'AUTO'\},\s*false\)/);
 });
 
 test('video listeners are detached before tracking a new YouTube route', () => {
@@ -475,7 +475,7 @@ test('Morphe library controls support navigation visibility, per-series Hide wat
   assert.match(source, /data-start-here=/);
   assert.match(source, /data-hide-watched=/);
   assert.match(source, /filter\(episode => !series\.hideWatched \|\| !isWatched\(episode\.id\)\)/);
-  assert.match(source, /const startHere = series\\.startHereVideoId/);
+  assert.match(source, /const startHere = series\.startHereVideoId/);
 });
 
 test('Start here is chosen even when the selected episode is already marked watched', () => {
