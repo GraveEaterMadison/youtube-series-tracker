@@ -144,8 +144,9 @@
     if (ended) return true;
     if (!Number.isFinite(position) || position < 0 || !Number.isFinite(duration) || duration <= 0) return false;
     const fraction = Math.max(0, Math.min(1, Number(threshold)));
-    return (position / duration >= fraction && duration - position <= 90000) ||
-      (duration > 60000 && remainingSeconds > 0 && duration - position <= remainingSeconds);
+    // HTMLMediaElement.currentTime and duration are seconds; native Morphe code stores milliseconds.
+    return (position / duration >= fraction && duration - position <= 90) ||
+      (duration > 60 && remainingSeconds > 0 && duration - position <= remainingSeconds);
   }
   function rememberUndo(ids, description) {
     const before = {};
