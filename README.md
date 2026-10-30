@@ -25,6 +25,12 @@ A local-first Firefox userscript for tracking YouTube playlists as series: episo
 - Configure watch-percentage and remaining-time completion thresholds (default 92% or 30 seconds remaining).
 - Manually override watched status, mark watched through an episode, mark all playable episodes watched, and undo the last progress action.
 - Hide watched episodes per series, choose a **Start here** episode for Continue watching, and show or hide the Series entry in YouTube navigation.
+- Guided Follow setup offers playlist or reverse order and can optionally mark earlier episodes watched.
+- Player Previous/Next controls and a Follow series action on playlist pages.
+- Catalog revisions, new-episode badges, six-hour stale refresh, retry backoff, and cursor recovery when playlists change.
+- Deterministic Continue watching states, including a recovery chooser when the saved episode is missing or ambiguous.
+- Optional local playback recording and visible History progress-bar completion import (no account identifiers or remote sync).
+- Versioned, validated backup/restore with a preview, legacy backup compatibility, and short-lived Undo for cleanup.
 - Optional auto-next navigation.
 - Refresh playlists and manually toggle watched status.
 - View continue-watching and matching entries from YouTube history.
@@ -38,7 +44,7 @@ A local-first Firefox userscript for tracking YouTube playlists as series: episo
 3. Create a new userscript in your manager, paste the source, and save it. If your manager offers to install the raw script directly, review the permissions and confirm.
 4. Reload YouTube. Open a playlist or video and look for the **Series** button/panel.
 
-The script currently declares only @grant none and matches https://www.youtube.com/*. Review the source before installing any userscript.
+The script declares only @grant none and matches https://www.youtube.com/*. Data remains in YouTube localStorage; Android account identity, native History endpoints and SQLite are not part of this userscript. Review the source before installing.
 
 ## How it stores data
 
@@ -48,8 +54,8 @@ Tracker data is stored in the browser's localStorage for YouTube. It is not sync
 
 - YouTube's page data and internal endpoints are not stable public APIs; playlist extraction can break after site updates.
 - History matching depends on history entries currently rendered by YouTube. Scroll to load more entries and rescan if needed.
-- Completion overrides, mark-through, auto-next, and playback progress still need manual Firefox testing.
-- Automated tests validate syntax, metadata, and basic source invariants; they are not browser end-to-end tests.
+- The YouTube History progress-bar selector and playlist/player toolbar placements still need live Firefox testing because YouTube can change its page structure.
+- Automated tests exercise the planner, refresh policy, completion rules, backup validation, and source wiring; they are not browser end-to-end tests.
 - No live Firefox/YouTube end-to-end test is claimed by this repository's CI.
 
 ## Development
