@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.5.0
+
+- Add Morphe-style completion rules: a configurable watch-percentage threshold, a separate remaining-time threshold (default 30 seconds), and an ended-video completion path.
+- Respect explicit manual watched/unwatched choices during playback progress updates, continue-watching selection, history matching, and auto-next.
+- Add **Mark watched through this episode**, bulk mark-all for playable episodes, and a reversible Undo action.
+- Keep the existing v2 local-storage key and data schema compatible so saved libraries and progress remain in place.
+
+
 ## 2.4.0
 
 - Make the player button automatically follow the current playlist and name the series from YouTube playlist metadata.
