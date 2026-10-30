@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.6.1
+
+- Add guided Follow setup with explicit playlist/reverse order and optional marking of earlier episodes as watched.
+- Add series-aware Previous/Next player controls and a Follow series action on playlist pages.
+- Track catalog revisions, newly discovered episodes, stale refresh age, bounded retry backoff, and cursor recovery after playlist changes.
+- Add a deterministic resume planner with resume, next, caught-up, no-playable, and choose/recovery states.
+- Add opt-in visible History progress completion without inventing seek positions or overriding manual unwatched status.
+- Add versioned backup exports, validation limits, restore preview, legacy backup compatibility, and an eight-second Undo window for cleanup.
+- Add separate controls for local playback recording, visible History completion import, stale catalog refresh, player controls, and data cleanup.
+- Keep browser storage local-only; Android identity/account sync, SQLite and bytecode hooks are not copied into the userscript.
+
+
 ## 2.5.1
 
 - Add Morphe-style **Hide watched** per-series filtering without removing watched progress from completion statistics.
