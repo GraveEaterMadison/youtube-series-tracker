@@ -26,13 +26,13 @@ A local-first Firefox userscript for tracking YouTube playlists as series: episo
 - Manually override watched status, mark watched through an episode, mark all playable episodes watched, and undo the last progress action.
 - Hide watched episodes per series, choose a **Start here** episode for Continue watching, and show or hide the Series entry in YouTube navigation.
 - Guided Follow setup offers playlist or reverse order and can optionally mark earlier episodes watched.
-- Player Previous/Next controls and a Follow series action on playlist pages.
+- Player Previous/Next controls, Follow series on playlist pages, and Follow by pasted playlist URL or ID with a guided start point.
 - Catalog revisions, new-episode badges, six-hour stale refresh, retry backoff, and cursor recovery when playlists change.
 - Deterministic Continue watching states, including a recovery chooser when the saved episode is missing or ambiguous.
 - Optional local playback recording and visible History progress-bar completion import (no account identifiers or remote sync).
-- Versioned, validated backup/restore with a preview, legacy backup compatibility, and short-lived Undo for cleanup.
+- Versioned, validated backup merge with a preview, legacy backup compatibility, Morphe-native import/export, and short-lived Undo for cleanup.
 - Optional auto-next navigation.
-- Refresh playlists and manually toggle watched status.
+- Refresh playlists and use per-episode actions for restart, resume, manual completion overrides, Start here, and mark watched through.
 - View continue-watching and matching entries from YouTube history.
 - Export and import a backup of tracker data.
 - Store tracker data locally, without a project backend or telemetry.
@@ -40,11 +40,11 @@ A local-first Firefox userscript for tracking YouTube playlists as series: episo
 ## Install in Firefox
 
 1. Install [Violentmonkey](https://violentmonkey.github.io/) or another compatible userscript manager.
-2. Open the [userscript source](https://raw.githubusercontent.com/GraveEaterMadison/youtube-series-tracker/main/youtube-series-tracker.user.js).
+2. Open the [userscript source](https://raw.githubusercontent.com/GraveEaterMadison/youtube-series-tracker/feature/morphe-style-auto-follow/youtube-series-tracker.user.js).
 3. Create a new userscript in your manager, paste the source, and save it. If your manager offers to install the raw script directly, review the permissions and confirm.
 4. Reload YouTube. Open a playlist or video and look for the **Series** button/panel.
 
-The script declares only @grant none and matches https://www.youtube.com/*. Data remains in YouTube localStorage; Android account identity, native History endpoints and SQLite are not part of this userscript. Review the source before installing.
+The script declares only @grant none and matches https://www.youtube.com/*. Data remains in YouTube localStorage. It can read and write Morphe-compatible library backups, but it does not share account-bound progress, Android identity, native History endpoints, or SQLite with the Morphe app. Review the source before installing.
 
 ## How it stores data
 
