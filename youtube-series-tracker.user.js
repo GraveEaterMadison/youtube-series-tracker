@@ -1206,7 +1206,8 @@
           saveDB();
         }
         if (!isWatched(exact.id)) return { kind: 'RESUME', episode: exact, position: stateFor(exact.id).position || 0 };
-        const next = episodes.find(ep => ep.order > exact.order && !isWatched(ep.id));
+        const cursorIndex = episodes.findIndex(ep => ep.id === exact.id && ep.order === exact.order);
+        const next = episodes.slice(cursorIndex + 1).find(ep => !isWatched(ep.id));
         return next ? { kind: 'NEXT', episode: next, position: stateFor(next.id).position || 0 }
           : { kind: 'CAUGHT_UP', episode: null, position: 0 };
       }
