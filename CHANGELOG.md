@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.5.1
+
+- Add Morphe-style **Hide watched** per-series filtering without removing watched progress from completion statistics.
+- Add **Start here** so Continue watching can begin at a chosen episode, including one previously marked watched.
+- Add a setting to show or hide the Series entry in YouTube navigation while keeping the player button independent.
+- Fix lazy episode action binding so Mark watched through and Start here work independently on every rendered batch.
+
+
 ## 2.5.0
 
 - Add Morphe-style completion rules: a configurable watch-percentage threshold, a separate remaining-time threshold (default 30 seconds), and an ended-video completion path.
