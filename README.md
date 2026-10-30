@@ -24,6 +24,7 @@ A local-first Firefox userscript for tracking YouTube playlists as series: episo
 - View cover artwork and progress summaries in the refreshed tracker panel.
 - Configure watch-percentage and remaining-time completion thresholds (default 92% or 30 seconds remaining).
 - Manually override watched status, mark watched through an episode, mark all playable episodes watched, and undo the last progress action.
+- Hide watched episodes per series, choose a **Start here** episode for Continue watching, and show or hide the Series entry in YouTube navigation.
 - Optional auto-next navigation.
 - Refresh playlists and manually toggle watched status.
 - View continue-watching and matching entries from YouTube history.
