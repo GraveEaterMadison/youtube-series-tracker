@@ -425,3 +425,42 @@ test('playback progress UI has its own throttle and does not reuse the save thro
   assert.match(source, /Date\.now\(\)-lastPanelRender>1800/);
   assert.match(source, /lastPanelRender=Date\.now\(\);renderPanel\(\)/);
 });
+
+
+test('Morphe-style completion policy supports percentage and remaining-time completion', () => {
+  const complete = vm.runInNewContext('(' + extractSimpleFunction(source, 'shouldAutoComplete') + ')');
+  assert.equal(complete(920, 1000, 0.92, 30, false), true);
+  assert.equal(complete(850, 1000, 0.92, 30, false), false);
+  assert.equal(complete(970, 1000, 1, 30, false), true);
+  assert.equal(complete(500, 1000, 0.92, 30, true), true);
+  assert.equal(complete(50, 0, 0.92, 30, false), false);
+});
+
+test('manual watched and unwatched overrides take precedence over automatic state', () => {
+  const isWatched = vm.runInNewContext('(' + extractSimpleFunction(source, 'isWatchedState') + ')');
+  assert.equal(isWatched({watched:false, completionOverride:'WATCHED'}), true);
+  assert.equal(isWatched({watched:true, completionOverride:'UNWATCHED'}), false);
+  assert.equal(isWatched({watched:true, completionOverride:'AUTO'}), true);
+  assert.equal(isWatched({watched:false, completionOverride:'AUTO'}), false);
+});
+
+test('manual completion is respected by recording and lazy-rendered episode actions', () => {
+  assert.match(source, /old\.completionOverride !== 'UNWATCHED'/);
+  assert.match(source, /markEpisode\(mark\.dataset\.mark, !isWatched\(mark\.dataset\.mark\)\)/);
+  assert.match(source, /const through = article\.querySelector\('\[data-through\]'\)/);
+});
+
+test('bulk mark-through and undo are implemented for series progress', () => {
+  assert.match(source, /function rememberUndo\(ids, description\)/);
+  assert.match(source, /function undoLastChange\(\)/);
+  assert.match(source, /function markThrough\(series, targetEpisode\)/);
+  assert.match(source, /data-through=/);
+  assert.match(source, /id="yst2-undo"/);
+  assert.match(source, /completionOverride:'WATCHED'/);
+});
+
+test('remaining-time completion is configurable independently from auto-next', () => {
+  assert.match(source, /watchedRemainingSeconds: AUTO_WATCHED_REMAINING_SECONDS/);
+  assert.match(source, /id="yst2-remaining"/);
+  assert.match(source, /id="yst2-autonext"/);
+});
