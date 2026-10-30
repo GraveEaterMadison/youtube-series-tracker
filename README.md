@@ -22,7 +22,8 @@ A local-first Firefox userscript for tracking YouTube playlists as series: episo
 - Incomplete catalog responses do not overwrite an existing series; unavailable episodes remain visible but cannot be opened or marked watched.
 - Search the series library, continue-watching list, and tracked History matches.
 - View cover artwork and progress summaries in the refreshed tracker panel.
-- Configure the auto-mark-watched threshold.
+- Configure watch-percentage and remaining-time completion thresholds (default 92% or 30 seconds remaining).
+- Manually override watched status, mark watched through an episode, mark all playable episodes watched, and undo the last progress action.
 - Optional auto-next navigation.
 - Refresh playlists and manually toggle watched status.
 - View continue-watching and matching entries from YouTube history.
@@ -46,7 +47,7 @@ Tracker data is stored in the browser's localStorage for YouTube. It is not sync
 
 - YouTube's page data and internal endpoints are not stable public APIs; playlist extraction can break after site updates.
 - History matching depends on history entries currently rendered by YouTube. Scroll to load more entries and rescan if needed.
-- Automatic next-episode behavior and playback progress need manual Firefox testing.
+- Completion overrides, mark-through, auto-next, and playback progress still need manual Firefox testing.
 - Automated tests validate syntax, metadata, and basic source invariants; they are not browser end-to-end tests.
 - No live Firefox/YouTube end-to-end test is claimed by this repository's CI.
 
