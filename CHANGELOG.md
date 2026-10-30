@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.7.0
+
+- Add Follow by pasted playlist URL or ID, with a guided order/start-episode selector and optional marking of preceding episodes watched.
+- Add a full episode action menu for Resume, Restart, Start here, watched/unwatched, Use automatic status, and Mark watched through.
+- Add a master enable switch and explicit confirmation before recording local playback progress.
+- Add a Series entry point from YouTube History without replacing YouTube's native History content.
+- Read and export Morphe's native `series-tracker` v1 backup format, including progress overrides, series order, cursor/bookmark and millisecond time conversion.
+- Change backup restore to add missing series only; existing series and shared-video progress are preserved.
+
+
 ## 2.6.1
 
 - Add guided Follow setup with explicit playlist/reverse order and optional marking of earlier episodes as watched.
