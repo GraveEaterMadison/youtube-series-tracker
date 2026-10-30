@@ -57,7 +57,7 @@ test('sidebar button relocates when YouTube navigation loads after the userscrip
 });
 
 test('one-by-one series builder actions are wired and versioned', () => {
-  assert.match(source, /^\/\/ @version\s+2\.4\.0$/m);
+  assert.match(source, /^\/\/ @version\s+2\.5\.0$/m);
   assert.match(source, /id="yst2-add-current"/);
   assert.match(source, /function showAddVideoDialog\(\)/);
   assert.match(source, /function saveVideoToSeries\(series, meta\)/);
@@ -115,6 +115,7 @@ test('auto-next never repeats an already-watched episode when no unwatched episo
   const orderedEpisodes = vm.runInNewContext(`(${extractSimpleFunction(source, 'orderedEpisodes')})`);
   const chooseNext = vm.runInNewContext(`(${extractSimpleFunction(source, 'chooseNext')})`, {
     stateFor: id => ({ watched: watched.has(id) }),
+    isWatched: id => watched.has(id),
     chooseContinue: () => ({ id: 'ddddddddddd' }),
     orderedEpisodes
   });
@@ -131,6 +132,7 @@ test('auto-next selects the next unwatched episode in playlist order', () => {
   const orderedEpisodes = vm.runInNewContext(`(${extractSimpleFunction(source, 'orderedEpisodes')})`);
   const chooseNext = vm.runInNewContext(`(${extractSimpleFunction(source, 'chooseNext')})`, {
     stateFor: id => ({ watched: watched.has(id) }),
+    isWatched: id => watched.has(id),
     chooseContinue: () => null,
     orderedEpisodes
   });
@@ -166,7 +168,7 @@ test('library UI includes search, progress overview, artwork, accessible tabs, a
   assert.match(source, /id="yst2-dashboard"/);
   assert.match(source, /class="yst2-series-art"/);
   assert.match(source, /aria-selected=/);
-  assert.ok(source.includes('data-sync="${esc(s.id)}"'));
+  assert.match(source, /data-sync="' \+ esc\(s\.id\)/);
   assert.match(source, /const applySearch = \(\)/);
   assert.match(source, /prefers-reduced-motion:reduce/);
 });
@@ -310,7 +312,8 @@ test('resume planner starts from the selected cursor before falling back to the 
   const orderedEpisodes = vm.runInNewContext('(' + extractSimpleFunction(source, 'orderedEpisodes') + ')');
   const chooseContinue = vm.runInNewContext('(' + extractSimpleFunction(source, 'chooseContinue') + ')', {
     orderedEpisodes,
-    stateFor: id => ({ watched: id === 'aaaaaaaaaaa' })
+    stateFor: id => ({ watched: id === 'aaaaaaaaaaa' }),
+    isWatched: id => id === 'aaaaaaaaaaa'
   });
   const series = {
     cursorVideoId: 'bbbbbbbbbbb',
@@ -412,7 +415,7 @@ test('lazy episode-list state and scroll position survive panel rerenders', () =
   assert.match(source, /loaded: list \? list\.children\.length : 0/);
   assert.match(source, /scrollTop: list \? list\.scrollTop : 0/);
   assert.match(source, /appendEpisodeBatch\(details, state\.loaded\)/);
-  assert.match(source, /if\(details\.open && details\.querySelector/);
+  assert.match(source, /if\s*\(details\.open\s*&&\s*details\.querySelector/);
 });
 
 test('episode search includes titles even when their rows have not been loaded into the DOM', () => {
