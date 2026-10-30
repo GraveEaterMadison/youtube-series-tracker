@@ -475,7 +475,7 @@ test('Morphe library controls support navigation visibility, per-series Hide wat
   assert.match(source, /data-start-here=/);
   assert.match(source, /data-hide-watched=/);
   assert.match(source, /filter\(episode => !series\.hideWatched \|\| !isWatched\(episode\.id\)\)/);
-  assert.match(source, /const startHere = s && s\.startHereVideoId/);
+  assert.match(source, /const startHere = series\\.startHereVideoId/);
 });
 
 test('Start here is chosen even when the selected episode is already marked watched', () => {
