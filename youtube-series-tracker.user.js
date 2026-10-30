@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Series Tracker
 // @namespace    https://github.com/GraveEaterMadison/youtube-series-tracker
-// @version      2.6.1
+// @version      2.7.0
 // @description  Follow YouTube playlists as series with guided setup, local progress, resume planning, History matching, and validated backup/restore.
 // @author       Zero
 // @license      MIT
@@ -93,6 +93,7 @@
         cursorRevision: Number.isInteger(item.cursorRevision) ? item.cursorRevision : 0,
         newEpisodeIds: Array.isArray(item.newEpisodeIds) ? item.newEpisodeIds.filter(id => /^[A-Za-z0-9_-]{11}$/.test(id)) : [],
         startHereVideoId: /^[A-Za-z0-9_-]{11}$/.test(String(item.startHereVideoId || '')) ? item.startHereVideoId : '',
+        bookmarkVideoId: /^[A-Za-z0-9_-]{11}$/.test(String(item.bookmarkVideoId || '')) ? item.bookmarkVideoId : '',
         startHereOrder: Number.isInteger(item.startHereOrder) ? item.startHereOrder : -1,
         lastRefreshAttemptAt: Number(item.lastRefreshAttemptAt) || 0,
         refreshRetryAt: Number(item.refreshRetryAt) || 0,
@@ -297,6 +298,18 @@
     return /^[A-Za-z0-9_-]{2,200}$/.test(value) && !/^(?:RD|UL)/.test(value) && value !== 'WL' && value !== 'LL';
   }
 
+  function parsePlaylistInput(input) {
+    const value = String(input || '').trim();
+    if (!value) return '';
+    let id = value;
+    try {
+      if (/^https?:\/\//i.test(value)) {
+        const url = new URL(value);
+        id = url.searchParams.get('list') || '';
+      }
+    } catch (_) { return ''; }
+    return isSuggestiblePlaylistId(id) ? id : '';
+  }
   function isDiscoveryPlaylistId(id) {
     return isSuggestiblePlaylistId(id) && !/^(?:UU|UUL)/.test(id);
   }
@@ -1328,12 +1341,56 @@
   }
   function markEpisode(id, watched) {
     if (!/^[A-Za-z0-9_-]{11}$/.test(id)) return;
-    const st = stateFor(id);
-    rememberUndo([id], watched ? 'mark episode watched' : 'mark episode unwatched');
-    setState(id, { watched, completionOverride: watched ? 'WATCHED' : 'UNWATCHED', position: watched ? (st.duration || st.position) : 0 });
+    const state = stateFor(id);
+    const override = watched === 'AUTO' ? 'AUTO' : watched ? 'WATCHED' : 'UNWATCHED';
+    const automatic = shouldAutoComplete(
+      state.position, state.duration,
+      Number(db.settings.watchedThreshold),
+      Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS)
+    );
+    const nextWatched = override === 'WATCHED' ? true : override === 'UNWATCHED' ? false : automatic;
+    rememberUndo([id], override === 'AUTO' ? 'restore automatic completion' : nextWatched ? 'mark episode watched' : 'mark episode unwatched');
+    setState(id, {
+      watched: nextWatched,
+      completionOverride: override,
+      position: override === 'WATCHED' ? (state.duration || state.position) : state.position
+    });
     renderPanel();
-    toast('Episode status updated. Use Undo to reverse.');
+    toast(override === 'AUTO' ? 'Automatic watched status restored.' : 'Episode status updated. Use Undo to reverse.');
   }
+  function showEpisodeMenu(series, episode) {
+    if (!series || !episode || episode.unavailable || episode.available === false
+        || !/^[A-Za-z0-9_-]{11}$/.test(episode.id)) return;
+    const state = stateFor(episode.id);
+    const watched = isWatched(episode.id);
+    const panel = document.getElementById(PANEL);
+    if (!panel) return;
+    panel.querySelector('#yst2-episode-menu-dialog')?.remove();
+    const actions = [];
+    if (!watched && state.position > 5) actions.push(['Restart from 0:00', () => openEpisode(series, episode, false)]);
+    actions.push([watched ? 'Play again from 0:00' : 'Resume at ' + fmt(state.position), () => openEpisode(series, episode, !watched)]);
+    actions.push(['Start here for Continue watching', () => setSeriesStartHere(series, episode)]);
+    actions.push([watched ? 'Mark unwatched' : 'Mark watched', () => markEpisode(episode.id, !watched)]);
+    if (state.completionOverride !== 'AUTO') actions.push(['Use automatic watched status', () => markEpisode(episode.id, 'AUTO')]);
+    actions.push(['Mark watched through this episode', () => markThrough(series, episode)]);
+    const modal = document.createElement('div');
+    modal.id = 'yst2-episode-menu-dialog';
+    modal.className = 'yst2-modal-backdrop';
+    modal.innerHTML = '<section class="yst2-modal" role="dialog" aria-modal="true" aria-labelledby="yst2-episode-menu-title">'
+      + '<header class="yst2-modal-head"><div><h3 id="yst2-episode-menu-title">' + esc(episode.title || 'Episode options') + '</h3><p class="yst2-muted">' + esc(series.title) + '</p></div><button class="yst2-icon" data-close aria-label="Close">×</button></header>'
+      + '<div class="yst2-menu-actions">' + actions.map((item,index) => '<button class="yst2-menu-action" type="button" data-action="' + index + '">' + esc(item[0]) + '</button>').join('') + '</div>'
+      + '<button class="yst2-subbtn" type="button" data-close>Cancel</button></section>';
+    panel.appendChild(modal);
+    modal.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', () => {
+      const action = actions[Number(button.dataset.action)];
+      modal.remove();
+      if (action) action[1]();
+    }));
+    modal.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', () => modal.remove()));
+    modal.addEventListener('click', event => { if (event.target === modal) modal.remove(); });
+    modal.addEventListener('keydown', event => { if (event.key === 'Escape') modal.remove(); });
+  }
+
   function episodeHTML(s,e) {
     const unavailable = Boolean(e.unavailable || e.available === false || !/^[A-Za-z0-9_-]{11}$/.test(e.id));
     const st = unavailable ? { watched:false, position:0, duration:e.duration||0 } : stateFor(e.id);
@@ -1345,11 +1402,12 @@
       + (thumbnail ? '<img class="yst2-thumb" loading="lazy" alt="" src="' + esc(thumbnail) + '">' : '<div class="yst2-thumb yst2-thumb-empty" aria-hidden="true">—</div>')
       + '<div class="yst2-epbody"><button class="yst2-epname" data-play="' + esc(e.id) + '" data-sid="' + esc(s.id) + '" data-order="' + esc(e.order) + '"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>'
       + esc(e.title || (unavailable ? 'Unavailable video' : st.title || e.id)) + '</button>'
-      + '<div class="yst2-muted">' + esc(status) + (!unavailable && (st.duration || e.duration) ? ' · ' + fmt(st.duration || e.duration) : '') + '</div>'
+      + '<div class="yst2-muted">' + esc(status) + (!unavailable && (st.duration || e.duration) ? ' · ' + fmt(st.duration || e.duration) : '') + (e.videoInfo ? ' · ' + esc(e.videoInfo) : '') + '</div>'
       + '<div class="yst2-bar"><i style="width:' + p + '%"></i></div></div>'
       + '<button class="yst2-mark ' + (watched ? 'checked' : '') + '" data-mark="' + esc(e.id) + '" title="' + (watched ? 'Mark unwatched' : 'Mark watched') + '"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>' + (watched ? '✓' : '○') + '</button>'
       + '<button class="yst2-through" data-through="' + esc(e.id) + '" data-sid="' + esc(s.id) + '" data-order="' + esc(e.order) + '" title="Mark watched through this episode" aria-label="Mark watched through this episode"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>⇢</button>'
       + '<button class="yst2-start-here" data-start-here="' + esc(e.id) + '" data-sid="' + esc(s.id) + '" data-order="' + esc(e.order) + '" title="Continue this series from this episode" aria-label="Continue this series from this episode"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>↳</button>'
+      + '<button class="yst2-episode-menu" data-episode-menu="' + esc(e.id) + '" data-sid="' + esc(s.id) + '" data-order="' + esc(e.order) + '" title="Episode options" aria-label="Episode options"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>⋯</button>'
       + '</article>';
   }
   function saveVideoToSeries(series, meta) {
@@ -1406,6 +1464,110 @@
     return true;
   }
 
+  function showFollowPlaylistDialog() {
+    const panel = document.getElementById(PANEL);
+    if (!panel) return;
+    panel.querySelector('#yst2-follow-playlist-dialog')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'yst2-follow-playlist-dialog';
+    modal.className = 'yst2-modal-backdrop';
+    modal.innerHTML = '<section class="yst2-modal" role="dialog" aria-modal="true" aria-labelledby="yst2-follow-playlist-title">'
+      + '<header class="yst2-modal-head"><div><h3 id="yst2-follow-playlist-title">Follow a YouTube playlist</h3><p class="yst2-muted">Paste a playlist URL or playlist ID.</p></div><button class="yst2-icon" data-close aria-label="Close">×</button></header>'
+      + '<label class="yst2-dialog-label" for="yst2-follow-playlist-input">Playlist link or ID</label><input id="yst2-follow-playlist-input" class="yst2-dialog-input" type="text" maxlength="2048" placeholder="https://www.youtube.com/playlist?list=…">'
+      + '<button id="yst2-follow-playlist-load" class="yst2-mainbtn" type="button">Load playlist</button><p id="yst2-follow-playlist-status" class="yst2-muted"></p><button class="yst2-subbtn" data-close>Cancel</button></section>';
+    panel.appendChild(modal);
+    const input = modal.querySelector('#yst2-follow-playlist-input');
+    const button = modal.querySelector('#yst2-follow-playlist-load');
+    const status = modal.querySelector('#yst2-follow-playlist-status');
+    const close = () => modal.remove();
+    modal.querySelectorAll('[data-close]').forEach(item => item.addEventListener('click', close));
+    modal.addEventListener('click', event => { if (event.target === modal) close(); });
+    modal.addEventListener('keydown', event => { if (event.key === 'Escape') close(); });
+    button.addEventListener('click', async () => {
+      const id = parsePlaylistInput(input.value);
+      if (!id) { status.textContent = 'Enter a supported YouTube playlist link or ID.'; return; }
+      if (findSeries(id)) { close(); await refreshSeries(id, false); return; }
+      button.disabled = true;
+      status.textContent = 'Loading all playlist pages…';
+      try {
+        const catalog = await fetchFullPlaylist(id);
+        if (!catalog.items.length) throw new Error('No playlist episodes were found.');
+        close();
+        showPlaylistFollowWizard({ id, title: catalog.title || id, items: catalog.items });
+      } catch (error) {
+        button.disabled = false;
+        status.textContent = (error?.message || 'Could not load playlist.') + ' No library changes were made.';
+      }
+    });
+    input.focus();
+  }
+  function showPlaylistFollowWizard(candidate) {
+    const panel = document.getElementById(PANEL);
+    if (!panel || !candidate?.items?.length) return;
+    panel.querySelector('#yst2-follow-wizard')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'yst2-follow-wizard';
+    modal.className = 'yst2-modal-backdrop';
+    modal.innerHTML = '<section class="yst2-modal" role="dialog" aria-modal="true" aria-labelledby="yst2-follow-wizard-title">'
+      + '<header class="yst2-modal-head"><div><h3 id="yst2-follow-wizard-title">Follow ' + esc(candidate.title) + '</h3><p class="yst2-muted">Choose playback order and where Continue watching should begin.</p></div><button class="yst2-icon" data-close aria-label="Close">×</button></header>'
+      + '<label class="yst2-dialog-label" for="yst2-follow-wizard-order">Episode order</label><select id="yst2-follow-wizard-order" class="yst2-dialog-select"><option value="playlist">YouTube playlist order</option><option value="reverse">Reverse playlist order</option></select>'
+      + '<label class="yst2-dialog-label" for="yst2-follow-wizard-start">Start episode</label><select id="yst2-follow-wizard-start" class="yst2-dialog-select"></select>'
+      + '<label class="yst2-setting"><input id="yst2-follow-wizard-previous" type="checkbox"> Mark earlier episodes watched</label>'
+      + '<button id="yst2-follow-wizard-save" class="yst2-mainbtn" type="button">Follow series</button><button class="yst2-subbtn" data-close>Cancel</button></section>';
+    panel.appendChild(modal);
+    const order = modal.querySelector('#yst2-follow-wizard-order');
+    const start = modal.querySelector('#yst2-follow-wizard-start');
+    const previous = modal.querySelector('#yst2-follow-wizard-previous');
+    const ordered = () => {
+      const items = [...candidate.items].sort((a,b) => (a.order ?? 0) - (b.order ?? 0));
+      if (order.value === 'reverse') items.reverse();
+      return items.filter(ep => ep.available !== false && !ep.unavailable && /^[A-Za-z0-9_-]{11}$/.test(ep.id));
+    };
+    const refreshChoices = () => {
+      const items = ordered();
+      start.innerHTML = items.map((ep,index) => '<option value="' + index + '">' + esc(ep.title || ('Episode ' + (index+1))) + '</option>').join('');
+      previous.disabled = items.length < 2;
+      previous.checked = false;
+    };
+    order.addEventListener('change', refreshChoices);
+    refreshChoices();
+    const close = () => modal.remove();
+    modal.querySelectorAll('[data-close]').forEach(item => item.addEventListener('click', close));
+    modal.addEventListener('click', event => { if (event.target === modal) close(); });
+    modal.addEventListener('keydown', event => { if (event.key === 'Escape') modal.remove(); });
+    modal.querySelector('#yst2-follow-wizard-save').addEventListener('click', () => {
+      const items = ordered();
+      const selected = items[Number(start.value)];
+      if (!selected) return;
+      rememberDatabaseUndo('follow playlist');
+      const series = mergeSeries(candidate.id, candidate.title || candidate.id, candidate.items);
+      series.playbackReverse = order.value === 'reverse';
+      const selectedIndex = items.findIndex(ep => ep.id === selected.id && ep.order === selected.order);
+      const now = Date.now();
+      if (previous.checked) {
+        for (const episode of items.slice(0, selectedIndex)) {
+          const old = stateFor(episode.id);
+          const wasWatched = isWatched(episode.id);
+          db.episodes[episode.id] = {
+            ...old, watched: true, completionOverride: 'WATCHED',
+            position: old.duration || episode.duration || old.position,
+            duration: old.duration || episode.duration || 0,
+            updatedAt: now, lastWatchedAt: wasWatched ? old.lastWatchedAt : now
+          };
+        }
+      }
+      series.cursorVideoId = selected.id;
+      series.cursorOrder = selected.order;
+      series.cursorUpdatedAt = now;
+      series.cursorRevision = Number(series.catalogRevision) || 0;
+      series.startHereVideoId = selected.id;
+      series.startHereOrder = selected.order;
+      saveDB();
+      close();
+      showSeriesInLibrary(series);
+      toast('Followed ' + series.title + ' · ' + series.episodes.length + ' episodes.');
+    });
+  }
   function showAddVideoDialog() {
     const meta = videoMeta();
     if (!meta) {
@@ -1552,6 +1714,13 @@
       const episode = series?.episodes.find(item => item.id === through.dataset.through && item.order === Number(through.dataset.order));
       if (series && episode) markThrough(series, episode);
     });
+    const menu = article.querySelector('[data-episode-menu]');
+    menu?.addEventListener('click', () => {
+      if (menu.disabled) return;
+      const series = db.series.find(item => item.id === menu.dataset.sid);
+      const episode = series?.episodes.find(item => item.id === menu.dataset.episodeMenu && item.order === Number(menu.dataset.order));
+      if (series && episode) showEpisodeMenu(series, episode);
+    });
     const start = article.querySelector('[data-start-here]');
     start?.addEventListener('click', () => {
       if (start.disabled) return;
@@ -1628,7 +1797,7 @@
         <div class="yst2-overall-progress"><div class="yst2-overall-label"><span>Overall progress</span><span>${watched} of ${total}</span></div><div class="yst2-bar big" role="progressbar" aria-label="Overall progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><i style="width:${pct}%"></i></div></div>
       </section>
       <section class="yst2-toolbar" aria-label="Tracker actions">
-        <div class="yst2-primary-actions"><button id="yst2-add-current" class="yst2-mainbtn"><span aria-hidden="true">＋</span> Add video</button><button id="yst2-sync" class="yst2-subbtn"><span aria-hidden="true">↻</span> Sync playlist</button></div>
+        <div class="yst2-primary-actions"><button id="yst2-add-current" class="yst2-mainbtn"><span aria-hidden="true">＋</span> Add video</button><button id="yst2-sync" class="yst2-subbtn"><span aria-hidden="true">↻</span> Sync playlist</button><button id="yst2-follow-playlist" class="yst2-subbtn">Follow link</button></div>
         <div class="yst2-data-actions"><button id="yst2-export" class="yst2-icon" title="Export backup" aria-label="Export backup">⇩</button><button id="yst2-import" class="yst2-icon" title="Import backup" aria-label="Import backup">⇧</button></div>
       </section>
       <nav class="yst2-tabs" role="tablist" aria-label="Tracker sections">${tabs.map(([k,v,count])=>`<button role="tab" data-tab="${k}" aria-selected="${activeTab===k?'true':'false'}" class="${activeTab===k?'active':''}"><span>${v}</span>${count===null?'':`<span class="yst2-tab-count">${count}</span>`}</button>`).join('')}</nav>
@@ -1656,6 +1825,7 @@
   function settingsHTML() {
     const s = db.settings;
     return `<section class="yst2-series"><h3>Playback & tracking</h3>
+      <label class="yst2-setting"><input type="checkbox" id="yst2-enabled" ${s.enabled!==false?'checked':''}> Enable Series Tracker</label>
       <label class="yst2-setting">Mark watched at <select id="yst2-threshold">
         ${[[0.5,'50%'],[0.75,'75%'],[0.9,'90%'],[0.95,'95%'],[1,'Video ends only']].map(([v,l])=>`<option value="${v}" ${Number(s.watchedThreshold)===v?'selected':''}>${l}</option>`).join('')}
       </select></label>
@@ -1706,6 +1876,7 @@
     search?.addEventListener('input', applySearch);
     applySearch();
     p.querySelector('#yst2-add-current')?.addEventListener('click', showAddVideoDialog);
+    p.querySelector('#yst2-follow-playlist')?.addEventListener('click', showFollowPlaylistDialog);
     p.querySelector('#yst2-sync')?.addEventListener('click', syncCurrentPlaylist);
     p.querySelectorAll('details[data-series-details]').forEach(details => {
       details.addEventListener('toggle', () => {
@@ -1726,6 +1897,7 @@
     p.querySelectorAll('[data-mark]').forEach(b=>b.addEventListener('click',()=>{const id=b.dataset.mark;markEpisode(id,!isWatched(id));}));
     p.querySelectorAll('[data-through]').forEach(b=>b.addEventListener('click',()=>{const series=db.series.find(item=>item.id===b.dataset.sid);const ep=series?.episodes.find(item=>item.id===b.dataset.through&&item.order===Number(b.dataset.order));if(series&&ep)markThrough(series,ep);}));
     p.querySelectorAll('[data-start-here]').forEach(b=>b.addEventListener('click',()=>{const series=db.series.find(item=>item.id===b.dataset.sid);const ep=series?.episodes.find(item=>item.id===b.dataset.startHere&&item.order===Number(b.dataset.order));if(series&&ep)setSeriesStartHere(series,ep);}));
+    p.querySelectorAll('[data-episode-menu]').forEach(b=>b.addEventListener('click',()=>{const series=db.series.find(item=>item.id===b.dataset.sid);const episode=series?.episodes.find(item=>item.id===b.dataset.episodeMenu&&item.order===Number(b.dataset.order));if(series&&episode)showEpisodeMenu(series,episode);}));
     p.querySelector('#yst2-undo')?.addEventListener('click',undoLastChange);
     p.querySelectorAll('[data-remove]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.remove);if(s&&confirm(`Remove “${s.title}” from the library? You can undo for 8 seconds.`)){rememberDatabaseUndo('remove series');db.series=db.series.filter(x=>x.id!==s.id);saveDB();renderPanel();toast('Series removed. Undo is available for 8 seconds.');}}));
     p.querySelectorAll('[data-sync]').forEach(b=>b.addEventListener('click',async()=>{await refreshSeries(b.dataset.sync,false);}));
@@ -1733,6 +1905,7 @@
     p.querySelectorAll('[data-history-play]').forEach(b=>b.addEventListener('click',()=>{const id=b.dataset.historyPlay;const s=db.series.find(x=>x.episodes.some(e=>e.id===id));const e=s?.episodes.find(x=>x.id===id);if(s&&e)openEpisode(s,e);else location.href=urlFor(id);}));
     p.querySelector('#yst2-export')?.addEventListener('click',exportBackup);
     p.querySelector('#yst2-import')?.addEventListener('click',importBackup);
+    p.querySelector('#yst2-enabled')?.addEventListener('change',e=>{db.settings.enabled=e.target.checked;saveDB();if(!e.target.checked){if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;}activePlaybackSession=null;currentVideoId='';activeVideo=null;addSidebarButton();addPlayerButton();addPlaylistFollowButton();toast('Series Tracker disabled. Your saved data is kept.');}else{ensureUI();trackCurrentVideo();toast('Series Tracker enabled.');}});
     p.querySelector('#yst2-threshold')?.addEventListener('change',e=>{db.settings.watchedThreshold=Number(e.target.value);saveDB();});
     p.querySelector('#yst2-remaining')?.addEventListener('change',e=>{db.settings.watchedRemainingSeconds=Number(e.target.value);saveDB();});
     p.querySelector('#yst2-autonext')?.addEventListener('change',e=>{db.settings.autoNext=e.target.checked;saveDB();});
@@ -1740,7 +1913,7 @@
     p.querySelector('#yst2-historyscan')?.addEventListener('change',e=>{db.settings.historyScan=e.target.checked;saveDB();});
     p.querySelector('#yst2-sidebar')?.addEventListener('change',e=>{db.settings.showSidebarButton=e.target.checked;saveDB();addSidebarButton();});
     p.querySelector('#yst2-player-visible')?.addEventListener('change',e=>{db.settings.showPlayerButton=e.target.checked;saveDB();addPlayerButton();});
-    p.querySelector('#yst2-record-progress')?.addEventListener('change',e=>{db.settings.recordPlaybackProgress=e.target.checked;saveDB();if(!e.target.checked)activePlaybackSession=null;});
+    p.querySelector('#yst2-record-progress')?.addEventListener('change',e=>{if(e.target.checked&&!confirm('Record playback progress for followed episodes in this browser? This stays in YouTube local storage and is not sent to Morphe or Google.')){e.target.checked=false;return;}db.settings.recordPlaybackProgress=e.target.checked;saveDB();if(!e.target.checked)activePlaybackSession=null;});
     p.querySelector('#yst2-import-history')?.addEventListener('change',e=>{db.settings.importHistoryProgress=e.target.checked;saveDB();});
     p.querySelector('#yst2-auto-catalog')?.addEventListener('change',e=>{db.settings.catalogAutoRefresh=e.target.checked;saveDB();if(e.target.checked)refreshStaleSeries();});
     p.querySelector('#yst2-clear-progress')?.addEventListener('click',()=>{if(confirm('Clear all playback positions and watched states but keep series catalogs?')){rememberDatabaseUndo('clear playback progress');db.episodes={};saveDB();renderPanel();toast('Playback progress cleared. Undo is available for 8 seconds.');}});
@@ -1953,6 +2126,23 @@
       }catch(_){}
     }
     saveDB();renderPanel();toast(`History scan found ${count} tracked episode(s). Scroll down to load more history, then scan again.`);
+  }
+  function addHistorySwitcher() {
+    const onHistory = location.pathname.startsWith('/feed/history');
+    const existing = document.getElementById('yst2-history-switcher');
+    if (!onHistory) { existing?.remove(); return; }
+    const host = document.querySelector('ytd-browse[page-subtype="history"] #header')
+      || document.querySelector('ytd-browse[page-subtype="history"] #primary')
+      || document.querySelector('ytd-browse[page-subtype="history"]');
+    if (!host) return;
+    if (existing && existing.parentElement === host) return;
+    existing?.remove();
+    const nav = document.createElement('div');
+    nav.id = 'yst2-history-switcher';
+    nav.setAttribute('role','tablist');
+    nav.innerHTML = '<button type="button" role="tab" aria-selected="true">Watch History</button><button type="button" role="tab" aria-selected="false">Series</button>';
+    nav.querySelectorAll('button')[1].addEventListener('click', () => { activeTab='library'; openPanel(); });
+    host.insertBefore(nav, host.firstChild);
   }
   function addSidebarButton() {
     let button = document.getElementById(BTN);
@@ -2378,6 +2568,7 @@
     addSidebarButton();
     addPlayerButton();
     addPlaylistFollowButton();
+    addHistorySwitcher();
   }
   function openPanel(){if(db.settings.enabled===false)activeTab='settings';document.getElementById(PANEL)?.classList.add('open');renderPanel();}
   function closePanel(){document.getElementById(PANEL)?.classList.remove('open');}
@@ -2585,6 +2776,7 @@
       if(db.settings.showSidebarButton!==false&&!document.getElementById(BTN)) addSidebarButton();
       addPlayerButton();
       addPlaylistFollowButton();
+      addHistorySwitcher();
     });
     mo.observe(document.documentElement,{childList:true,subtree:true});
   }
