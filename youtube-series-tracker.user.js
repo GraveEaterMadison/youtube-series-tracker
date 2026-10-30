@@ -1635,6 +1635,9 @@
       <label class="yst2-setting"><input type="checkbox" id="yst2-import-history" ${s.importHistoryProgress?'checked':''}> Use visible History progress bars for completion</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-auto-catalog" ${s.catalogAutoRefresh!==false?'checked':''}> Refresh stale followed playlists automatically</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-historyscan" ${s.historyScan?'checked':''}> Match YouTube History page videos to known episodes</label>
+      <p class="yst2-muted">History import uses only progress indicators currently rendered on the History page. It never reads account identifiers or sends progress to a server.</p>
+      <button id="yst2-clear-progress" class="yst2-subbtn">Clear playback progress (keep series)</button>
+      <button id="yst2-clear-history" class="yst2-subbtn">Clear History matches</button>
       <p class="yst2-muted">Progress is stored in this Firefox profile on YouTube. It does not sync to Morphe or your Google account. You can export a backup at any time.</p>
       <button id="yst2-clear" class="yst2-subbtn dangerbtn">Delete all series and progress</button></section>
       <section class="yst2-series"><h3>Data tools</h3><button id="yst2-recount" class="yst2-subbtn">Recalculate watched status from saved positions</button><button id="yst2-markall" class="yst2-subbtn">Mark current series watched</button></section>`;
@@ -1707,7 +1710,9 @@
     p.querySelector('#yst2-record-progress')?.addEventListener('change',e=>{db.settings.recordPlaybackProgress=e.target.checked;saveDB();if(!e.target.checked)activePlaybackSession=null;});
     p.querySelector('#yst2-import-history')?.addEventListener('change',e=>{db.settings.importHistoryProgress=e.target.checked;saveDB();});
     p.querySelector('#yst2-auto-catalog')?.addEventListener('change',e=>{db.settings.catalogAutoRefresh=e.target.checked;saveDB();if(e.target.checked)refreshStaleSeries();});
-    p.querySelector('#yst2-clear')?.addEventListener('click',()=>{if(confirm('Permanently delete all series, episode progress, and history matches? Export a backup first if needed.')){db=emptyDB();saveDB();renderPanel();toast('Tracker data deleted.');}});
+    p.querySelector('#yst2-clear-progress')?.addEventListener('click',()=>{if(confirm('Clear all playback positions and watched states but keep series catalogs?')){rememberDatabaseUndo('clear playback progress');db.episodes={};saveDB();renderPanel();toast('Playback progress cleared. Undo is available for 8 seconds.');}});
+    p.querySelector('#yst2-clear-history')?.addEventListener('click',()=>{if(confirm('Clear local History matches only?')){rememberDatabaseUndo('clear History matches');db.history={};saveDB();renderPanel();toast('History matches cleared. Undo is available for 8 seconds.');}});
+    p.querySelector('#yst2-clear')?.addEventListener('click',()=>{if(confirm('Permanently delete all series, episode progress, and History matches?')){rememberDatabaseUndo('delete all tracker data');db=emptyDB();saveDB();renderPanel();toast('Tracker data deleted. Undo is available for 8 seconds.');}});
     p.querySelector('#yst2-recount')?.addEventListener('click',()=>{rememberUndo(Object.keys(db.episodes),'recalculate completion');for(const [id,st] of Object.entries(db.episodes)){setState(id,{watched:shouldAutoComplete(st.position,st.duration,Number(db.settings.watchedThreshold),Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS)),completionOverride:'AUTO'},false);}saveDB();renderPanel();toast('Automatic completion recalculated.');});
     p.querySelector('#yst2-markall')?.addEventListener('click',()=>{const s=findSeries(getPlaylistId());if(!s){toast('Open a tracked series playlist first.');return;}const playable=s.episodes.filter(e=>e.available!==false&&!e.unavailable&&/^[A-Za-z0-9_-]{11}$/.test(e.id));if(confirm(`Mark all ${playable.length} playable episodes watched?`)){rememberUndo(playable.map(e=>e.id),'mark all episodes watched');const now=Date.now();for(const e of playable){const old=stateFor(e.id);const already=isWatched(e.id);db.episodes[e.id]={...old,watched:true,completionOverride:'WATCHED',position:old.duration||e.duration||old.position,duration:old.duration||e.duration||0,updatedAt:now,lastWatchedAt:already?old.lastWatchedAt:now};}saveDB();renderPanel();toast('All playable episodes marked watched.');}});
     p.querySelector('#yst2-scanhistory')?.addEventListener('click',scanHistoryPage);
@@ -1949,6 +1954,39 @@
       button.classList.add('floating');
     }
   }
+  function addPlaylistFollowButton() {
+    const listId=getPlaylistId();
+    const onPlaylist=location.pathname==='/playlist'||location.pathname.startsWith('/playlist');
+    const host=document.querySelector('ytd-playlist-header-renderer #top-level-buttons-computed')
+      || document.querySelector('ytd-playlist-header-renderer #actions')
+      || document.querySelector('ytd-playlist-header-renderer #primary');
+    const existing=document.getElementById(PLAYLIST_BTN);
+    if(!onPlaylist||!isSuggestiblePlaylistId(listId)||!host){existing?.remove();return;}
+    const followed=findSeries(listId);
+    if(existing&&existing.parentElement===host){
+      existing.textContent=followed?'View series':'Follow series';
+      existing.dataset.playlist=listId;
+      return;
+    }
+    existing?.remove();
+    const button=document.createElement('button');
+    button.type='button';button.id=PLAYLIST_BTN;
+    button.className='yt-spec-button-shape-next yt-spec-button-shape-next--tonal yt-spec-button-shape-next--mono';
+    button.textContent=followed?'View series':'Follow series';
+    button.title='Open or follow this playlist as a series';
+    button.dataset.playlist=listId;
+    button.addEventListener('click',async()=>{
+      const id=button.dataset.playlist;
+      const saved=findSeries(id);
+      if(saved){showSeriesInLibrary(saved);return;}
+      if(getPlaylistId()!==id){toast('Playlist changed. Refresh the page and try again.');return;}
+      await syncCurrentPlaylist();
+      const newlySaved=findSeries(id);
+      if(newlySaved)showSeriesInLibrary(newlySaved);
+    });
+    host.appendChild(button);
+  }
+
   function addPlayerButton() {
     const player = document.querySelector('#movie_player');
     if (!player) return;
@@ -2284,6 +2322,7 @@
     if(!document.getElementById(PANEL)){const p=document.createElement('aside');p.id=PANEL;document.body.appendChild(p);}
     addSidebarButton();
     addPlayerButton();
+    addPlaylistFollowButton();
   }
   function openPanel(){document.getElementById(PANEL)?.classList.add('open');renderPanel();}
   function closePanel(){document.getElementById(PANEL)?.classList.remove('open');}
@@ -2331,7 +2370,7 @@
       #${BTN}{display:flex;align-items:center;gap:20px;width:100%;padding:10px 12px;border:0;border-radius:10px;background:transparent;color:var(--yt-spec-text-primary,#f1f1f1);font:500 14px Roboto,Arial,sans-serif;cursor:pointer}
       #${BTN}:hover{background:var(--yt-spec-10-percent-layer,#272727)}#${BTN} svg{width:24px;height:24px;fill:currentColor;flex:none}
       #${BTN}.floating{position:fixed;z-index:999990;left:12px;bottom:18px;width:auto;background:#ff1744;color:white;border-radius:22px;padding:10px 15px;box-shadow:0 5px 20px #0007}
-      #${PLAYER_PREV_BTN},#${PLAYER_NEXT_BTN}{display:inline-flex!important;align-items:center;justify-content:center;width:30px;height:40px;border:0;background:transparent;color:#f2f2f2;cursor:pointer;font-size:21px;vertical-align:top}#${PLAYER_PREV_BTN}:hover,#${PLAYER_NEXT_BTN}:hover{opacity:.72}#${PLAYER_BTN}{display:inline-flex!important;align-items:center;justify-content:center;width:48px;height:48px;padding:0;margin:0;border:0;background:transparent;color:#f1f1f1;cursor:pointer;flex:0 0 48px;vertical-align:top}
+      #${PLAYLIST_BTN}{margin:8px!important;border-radius:9px!important;padding:0 13px!important;min-height:36px!important;font-size:12px!important}#${PLAYER_PREV_BTN},#${PLAYER_NEXT_BTN}{display:inline-flex!important;align-items:center;justify-content:center;width:30px;height:40px;border:0;background:transparent;color:#f2f2f2;cursor:pointer;font-size:21px;vertical-align:top}#${PLAYER_PREV_BTN}:hover,#${PLAYER_NEXT_BTN}:hover{opacity:.72}#${PLAYER_BTN}{display:inline-flex!important;align-items:center;justify-content:center;width:48px;height:48px;padding:0;margin:0;border:0;background:transparent;color:#f1f1f1;cursor:pointer;flex:0 0 48px;vertical-align:top}
       #${PLAYER_BTN} svg{display:block;width:24px;height:24px;fill:currentColor}
       #${PLAYER_BTN}:hover{opacity:.82}
       #${PLAYER_BTN}:focus-visible{outline:2px solid #fff;outline-offset:-4px;border-radius:8px}
@@ -2487,8 +2526,9 @@
   }
   function observeSidebar() {
     const mo=new MutationObserver(()=>{
-      if(!document.getElementById(BTN)) addSidebarButton();
+      if(db.settings.showSidebarButton!==false&&!document.getElementById(BTN)) addSidebarButton();
       addPlayerButton();
+      addPlaylistFollowButton();
     });
     mo.observe(document.documentElement,{childList:true,subtree:true});
   }
@@ -2501,8 +2541,9 @@
     if(tickTimer)clearInterval(tickTimer);
     tickTimer=setInterval(()=>{
       if(getVideoId() && (getVideoId()!==currentVideoId || document.querySelector('video')!==activeVideo))trackCurrentVideo();
-      if(!document.getElementById(BTN)) addSidebarButton();
+      if(db.settings.showSidebarButton!==false&&!document.getElementById(BTN)) addSidebarButton();
       addPlayerButton();
+      addPlaylistFollowButton();
     },1500);
   }
   boot();
