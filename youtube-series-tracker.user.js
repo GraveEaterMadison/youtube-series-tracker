@@ -1232,7 +1232,13 @@
     const mark = article.querySelector('[data-mark]');
     mark?.addEventListener('click', () => {
       if (mark.disabled) return;
-      markEpisode(mark.dataset.mark, !stateFor(mark.dataset.mark).watched);
+      markEpisode(mark.dataset.mark, !isWatched(mark.dataset.mark));
+    const through = article.querySelector('[data-through]');
+    through?.addEventListener('click', () => {
+      const series = db.series.find(item => item.id === through.dataset.sid);
+      const episode = series?.episodes.find(item => item.id === through.dataset.through);
+      if (series && episode) markThrough(series, episode);
+    });
     });
   }
 
@@ -1402,7 +1408,7 @@
     p.querySelector('#yst2-historyscan')?.addEventListener('change',e=>{db.settings.historyScan=e.target.checked;saveDB();});
     p.querySelector('#yst2-clear')?.addEventListener('click',()=>{if(confirm('Permanently delete all series, episode progress, and history matches? Export a backup first if needed.')){db=emptyDB();saveDB();renderPanel();toast('Tracker data deleted.');}});
     p.querySelector('#yst2-recount')?.addEventListener('click',()=>{rememberUndo(Object.keys(db.episodes),'recalculate completion');for(const [id,st] of Object.entries(db.episodes)){setState(id,{watched:shouldAutoComplete(st.position,st.duration,Number(db.settings.watchedThreshold),Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS)),completionOverride:'AUTO'},false);}saveDB();renderPanel();toast('Automatic completion recalculated.');});
-    p.querySelector('#yst2-markall')?.addEventListener('click',()=>{const s=findSeries(getPlaylistId());if(!s){toast('Open a tracked series playlist first.');return;}if(confirm(`Mark all ${s.episodes.length} episodes watched?`)){const now=Date.now();for(const e of s.episodes){const old=stateFor(e.id);db.episodes[e.id]={...old,watched:true,position:old.duration||e.duration||old.position,duration:old.duration||e.duration||0,updatedAt:now,lastWatchedAt:old.watched?old.lastWatchedAt:now};}saveDB();renderPanel();toast('All episodes marked watched.');}});
+    p.querySelector('#yst2-markall')?.addEventListener('click',()=>{const s=findSeries(getPlaylistId());if(!s){toast('Open a tracked series playlist first.');return;}const playable=s.episodes.filter(e=>e.available!==false&&!e.unavailable&&/^[A-Za-z0-9_-]{11}$/.test(e.id));if(confirm(`Mark all ${playable.length} playable episodes watched?`)){rememberUndo(playable.map(e=>e.id),'mark all episodes watched');const now=Date.now();for(const e of playable){const old=stateFor(e.id);const already=isWatched(e.id);db.episodes[e.id]={...old,watched:true,completionOverride:'WATCHED',position:old.duration||e.duration||old.position,duration:old.duration||e.duration||0,updatedAt:now,lastWatchedAt:already?old.lastWatchedAt:now};}saveDB();renderPanel();toast('All playable episodes marked watched.');}});
     p.querySelector('#yst2-scanhistory')?.addEventListener('click',scanHistoryPage);
   }
   function exportBackup() {
