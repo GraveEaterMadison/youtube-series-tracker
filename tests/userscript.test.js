@@ -467,3 +467,32 @@ test('remaining-time completion is configurable independently from auto-next', (
   assert.match(source, /id="yst2-remaining"/);
   assert.match(source, /id="yst2-autonext"/);
 });
+
+
+test('Morphe library controls support navigation visibility, per-series Hide watched, and Start here', () => {
+  assert.match(source, /id="yst2-sidebar"/);
+  assert.match(source, /function setSeriesStartHere\(series, episode\)/);
+  assert.match(source, /data-start-here=/);
+  assert.match(source, /data-hide-watched=/);
+  assert.match(source, /filter\(episode => !series\.hideWatched \|\| !isWatched\(episode\.id\)\)/);
+  assert.match(source, /const startHere = s && s\.startHereVideoId/);
+});
+
+test('Start here is chosen even when the selected episode is already marked watched', () => {
+  const orderedEpisodes = vm.runInNewContext('(' + extractSimpleFunction(source, 'orderedEpisodes') + ')');
+  const chooseContinue = vm.runInNewContext('(' + extractSimpleFunction(source, 'chooseContinue') + ')', {
+    orderedEpisodes,
+    isWatched: () => true,
+    stateFor: () => ({ watched: true })
+  });
+  const series = {
+    startHereVideoId: 'bbbbbbbbbbb',
+    startHereOrder: 1,
+    episodes: [
+      {id:'aaaaaaaaaaa',order:0},
+      {id:'bbbbbbbbbbb',order:1},
+      {id:'ccccccccccc',order:2}
+    ]
+  };
+  assert.equal(chooseContinue(series).id, 'bbbbbbbbbbb');
+});
