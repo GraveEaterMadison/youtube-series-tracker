@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Series Tracker
 // @namespace    https://github.com/GraveEaterMadison/youtube-series-tracker
-// @version      2.4.0
+// @version      2.5.0
 // @description  Build YouTube series from playlists or add individual videos, with automatic default series names, local progress, watched status, history matching, and optional auto-next.
 // @author       Zero
 // @license      MIT
@@ -22,7 +22,9 @@
   const STYLE = 'yst2-style';
   const BTN = 'yst2-button';
   const PLAYER_BTN = 'yst2-player-button';
-  const AUTO_WATCHED_DEFAULT = 0.90;
+  const AUTO_WATCHED_DEFAULT = 0.92;
+  const AUTO_WATCHED_REMAINING_SECONDS = 30;
+  let lastUndo = null;
   const SAVE_MS = 2000;
   const AUTO_SYNC_KEY = 'yst2-last-sync';
   let db = loadDB();
@@ -46,6 +48,7 @@
       version: VERSION,
       settings: {
         watchedThreshold: AUTO_WATCHED_DEFAULT,
+        watchedRemainingSeconds: AUTO_WATCHED_REMAINING_SECONDS,
         autoNext: false,
         autoSyncOnOpen: true,
         showSidebarButton: true,
@@ -128,7 +131,62 @@
       url: `https://www.youtube.com/watch?v=${id}`, thumb: `https://i.ytimg.com/vi/${id}/hqdefault.jpg` };
   }
   function stateFor(id) {
-    return db.episodes[id] || { watched: false, position: 0, duration: 0, title: '', updatedAt: 0, lastWatchedAt: 0 };
+    return db.episodes[id] || { watched: false, completionOverride: 'AUTO', position: 0, duration: 0, title: '', updatedAt: 0, lastWatchedAt: 0 };
+  }
+  function isWatchedState(state) {
+    if (!state) return false;
+    if (state.completionOverride === 'WATCHED') return true;
+    if (state.completionOverride === 'UNWATCHED') return false;
+    return Boolean(state.watched);
+  }
+  function isWatched(id) { return isWatchedState(stateFor(id)); }
+  function shouldAutoComplete(position, duration, threshold, remainingSeconds, ended = false) {
+    if (ended) return true;
+    if (!Number.isFinite(position) || position < 0 || !Number.isFinite(duration) || duration <= 0) return false;
+    const fraction = Math.max(0, Math.min(1, Number(threshold)));
+    return (position / duration >= fraction && duration - position <= 90000) ||
+      (duration > 60000 && remainingSeconds > 0 && duration - position <= remainingSeconds);
+  }
+  function rememberUndo(ids, description) {
+    const before = {};
+    for (const id of new Set(ids)) before[id] = Object.prototype.hasOwnProperty.call(db.episodes, id) ? { ...db.episodes[id] } : null;
+    lastUndo = { before, description };
+  }
+  function undoLastChange() {
+    if (!lastUndo) return false;
+    for (const [id, old] of Object.entries(lastUndo.before)) {
+      if (old === null) delete db.episodes[id];
+      else db.episodes[id] = { ...old };
+    }
+    const description = lastUndo.description;
+    lastUndo = null;
+    saveDB();
+    renderPanel();
+    toast('Undone: ' + description);
+    return true;
+  }
+  function markThrough(series, targetEpisode) {
+    if (!series || !targetEpisode) return false;
+    const playable = orderedEpisodes(series).filter(ep => ep.available !== false && !ep.unavailable && /^[A-Za-z0-9_-]{11}$/.test(ep.id));
+    const index = playable.findIndex(ep => ep.id === targetEpisode.id && ep.order === targetEpisode.order);
+    if (index < 0) return false;
+    const selected = playable.slice(0, index + 1);
+    rememberUndo(selected.map(ep => ep.id), 'mark watched through episode');
+    const now = Date.now();
+    for (const ep of selected) {
+      const old = stateFor(ep.id);
+      const already = isWatched(ep.id);
+      db.episodes[ep.id] = {
+        ...old, watched: true, completionOverride: 'WATCHED',
+        position: old.duration || ep.duration || old.position,
+        duration: old.duration || ep.duration || 0,
+        updatedAt: now, lastWatchedAt: already ? old.lastWatchedAt : now
+      };
+    }
+    saveDB();
+    renderPanel();
+    toast('Marked ' + selected.length + ' episodes watched.');
+    return true;
   }
   function setState(id, patch, persist = true) {
     const old = stateFor(id);
@@ -924,11 +982,11 @@
   function stats(s) {
     const eps = s.episodes || [];
     const playable = eps.filter(e => e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
-    const watched = playable.filter(e => stateFor(e.id).watched).length;
-    const active = playable.filter(e => !stateFor(e.id).watched && stateFor(e.id).position > 5).length;
+    const watched = playable.filter(e => isWatched(e.id)).length;
+    const active = playable.filter(e => !isWatched(e.id) && stateFor(e.id).position > 5).length;
     const left = playable.reduce((n,e) => {
       const st = stateFor(e.id);
-      return n + (st.watched ? 0 : Math.max(0, (st.duration || e.duration || 0) - (st.position || 0)));
+      return n + (isWatched(e.id) ? 0 : Math.max(0, (st.duration || e.duration || 0) - (st.position || 0)));
     }, 0);
     return {
       total: eps.length,
@@ -942,7 +1000,7 @@
   function progress(e) {
     if (e.unavailable || e.available === false || !/^[A-Za-z0-9_-]{11}$/.test(e.id)) return 0;
     const st = stateFor(e.id);
-    if (st.watched) return 100;
+    if (isWatched(e.id)) return 100;
     const d = st.duration || e.duration || 0;
     return d ? Math.max(0, Math.min(99, st.position / d * 100)) : 0;
   }
@@ -973,12 +1031,12 @@
       : -1;
     if (cursorIndex >= 0) {
       const cursor = eps[cursorIndex];
-      if (!stateFor(cursor.id).watched) return cursor;
-      const afterCursor = eps.slice(cursorIndex + 1).find(e => !stateFor(e.id).watched);
+      if (!isWatched(cursor.id)) return cursor;
+      const afterCursor = eps.slice(cursorIndex + 1).find(e => !isWatched(e.id));
       if (afterCursor) return afterCursor;
     }
-    return eps.find(e => !stateFor(e.id).watched && stateFor(e.id).position > 5) ||
-      eps.find(e => !stateFor(e.id).watched) || null;
+    return eps.find(e => !isWatched(e.id) && stateFor(e.id).position > 5) ||
+      eps.find(e => !isWatched(e.id)) || null;
   }
   function chooseNext(s, id, requestedOrder) {
     const eps = orderedEpisodes(s).filter(e =>
@@ -987,7 +1045,7 @@
       ? eps.findIndex(e => e.id === id && e.order === requestedOrder)
       : -1;
     if (idx < 0) idx = eps.findIndex(e => e.id === id);
-    if (idx >= 0) return eps.slice(idx + 1).find(e => !stateFor(e.id).watched) || null;
+    if (idx >= 0) return eps.slice(idx + 1).find(e => !isWatched(e.id)) || null;
     return chooseContinue(s);
   }
   function openEpisode(s, e, resume = true) {
@@ -997,27 +1055,31 @@
     s.cursorOrder = Number.isInteger(e.order) ? e.order : undefined;
     s.cursorUpdatedAt = Date.now();
     saveDB();
-    location.href = urlFor(e.id, s.playlistId, s.playlistId ? e.order : undefined, resume && !st.watched ? st.position : 0);
+    location.href = urlFor(e.id, s.playlistId, s.playlistId ? e.order : undefined, resume && !isWatched(e.id) ? st.position : 0);
   }
   function markEpisode(id, watched) {
     if (!/^[A-Za-z0-9_-]{11}$/.test(id)) return;
     const st = stateFor(id);
-    setState(id, { watched, position: watched ? (st.duration || st.position) : 0 });
+    rememberUndo([id], watched ? 'mark episode watched' : 'mark episode unwatched');
+    setState(id, { watched, completionOverride: watched ? 'WATCHED' : 'UNWATCHED', position: watched ? (st.duration || st.position) : 0 });
     renderPanel();
+    toast('Episode status updated. Use Undo to reverse.');
   }
   function episodeHTML(s,e) {
     const unavailable = Boolean(e.unavailable || e.available === false || !/^[A-Za-z0-9_-]{11}$/.test(e.id));
     const st = unavailable ? { watched:false, position:0, duration:e.duration||0 } : stateFor(e.id);
+    const watched = !unavailable && isWatched(e.id);
     const p = progress(e);
-    const status = unavailable ? 'Unavailable on YouTube' : st.watched ? 'Watched' : st.position > 5 ? Math.round(p) + '% watched · ' + fmt(st.position) + ' / ' + fmt(st.duration || e.duration) : 'Not watched';
+    const status = unavailable ? 'Unavailable on YouTube' : watched ? 'Watched' : st.position > 5 ? Math.round(p) + '% watched · ' + fmt(st.position) + ' / ' + fmt(st.duration || e.duration) : 'Not watched';
     const thumbnail = e.thumb || (/^[A-Za-z0-9_-]{11}$/.test(e.id) ? 'https://i.ytimg.com/vi/' + e.id + '/hqdefault.jpg' : '');
-    return '<article class="yst2-ep ' + (st.watched ? 'is-watched' : '') + (unavailable ? ' is-unavailable' : '') + '">'
+    return '<article class="yst2-ep ' + (watched ? 'is-watched' : '') + (unavailable ? ' is-unavailable' : '') + '">'
       + (thumbnail ? '<img class="yst2-thumb" loading="lazy" alt="" src="' + esc(thumbnail) + '">' : '<div class="yst2-thumb yst2-thumb-empty" aria-hidden="true">—</div>')
       + '<div class="yst2-epbody"><button class="yst2-epname" data-play="' + esc(e.id) + '" data-sid="' + esc(s.id) + '"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>'
       + esc(e.title || (unavailable ? 'Unavailable video' : st.title || e.id)) + '</button>'
       + '<div class="yst2-muted">' + esc(status) + (!unavailable && (st.duration || e.duration) ? ' · ' + fmt(st.duration || e.duration) : '') + '</div>'
       + '<div class="yst2-bar"><i style="width:' + p + '%"></i></div></div>'
-      + '<button class="yst2-mark ' + (st.watched ? 'checked' : '') + '" data-mark="' + esc(e.id) + '" title="' + (st.watched ? 'Mark unwatched' : 'Mark watched') + '"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>' + (st.watched ? '✓' : '○') + '</button>'
+      + '<button class="yst2-mark ' + (watched ? 'checked' : '') + '" data-mark="' + esc(e.id) + '" title="' + (watched ? 'Mark unwatched' : 'Mark watched') + '"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>' + (watched ? '✓' : '○') + '</button>'
+      + '<button class="yst2-through" data-through="' + esc(e.id) + '" data-sid="' + esc(s.id) + '" title="Mark watched through this episode" aria-label="Mark watched through this episode"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>⇢</button>'
       + '</article>';
   }
   function saveVideoToSeries(series, meta) {
@@ -1211,7 +1273,7 @@
     });
     const allEpisodes = db.series.flatMap(s => s.episodes || []).filter(e => e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
     const total = allEpisodes.length;
-    const watched = allEpisodes.filter(e => stateFor(e.id).watched).length;
+    const watched = allEpisodes.filter(e => isWatched(e.id)).length;
     const allCont = db.series.map(s=>({s,e:chooseContinue(s)})).filter(x=>x.e);
     const pct = total ? Math.round(watched / total * 100) : 0;
     const historyCount = Object.keys(db.history).length;
@@ -1248,7 +1310,7 @@
       ${activeTab === 'settings' ? '' : `<div class="yst2-searchwrap"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"></circle><path d="m16 16 5 5"></path></svg><input id="yst2-search" type="search" value="${esc(librarySearch)}" placeholder="${activeTab==='history'?'Search history matches':'Search series and episodes'}" aria-label="Search ${activeTab==='history'?'history matches':'series and episodes'}"><kbd>⌕</kbd></div>`}
       <div id="yst2-search-empty" class="yst2-search-empty" hidden>No matches. Try another title.</div>
       <div class="yst2-content">${body}</div>
-      <footer class="yst2-footer"><span class="yst2-privacy"><span></span> Stored locally in this browser</span><span>${db.lastSync?`Synced ${new Date(db.lastSync).toLocaleDateString()}`:'Not synced yet'}</span></footer>`;
+      <footer class="yst2-footer"><span class="yst2-privacy"><span></span> Stored locally in this browser</span><span>${db.lastSync?`Synced ${new Date(db.lastSync).toLocaleDateString()}`:'Not synced yet'}</span>${lastUndo?'<button id="yst2-undo" class="yst2-subbtn" type="button">Undo last change</button>':''}</footer>`;
     bindPanel();
     for (const [id, state] of episodeUiState) {
       const details = p.querySelector('details[data-series-details="' + CSS.escape(id) + '"]');
@@ -1272,6 +1334,7 @@
       <label class="yst2-setting">Mark watched at <select id="yst2-threshold">
         ${[[0.5,'50%'],[0.75,'75%'],[0.9,'90%'],[0.95,'95%'],[1,'Video ends only']].map(([v,l])=>`<option value="${v}" ${Number(s.watchedThreshold)===v?'selected':''}>${l}</option>`).join('')}
       </select></label>
+      <label class="yst2-setting">Complete when this much time remains <select id="yst2-remaining">${[[0,'Disabled'],[15,'15 seconds'],[30,'30 seconds'],[60,'1 minute'],[90,'90 seconds']].map(([v,l])=>`<option value="${v}" ${Number(s.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS)===v?'selected':''}>${l}</option>`).join('')}</select></label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-autonext" ${s.autoNext?'checked':''}> Automatically play the next unwatched episode when a tracked episode ends</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-autosync" ${s.autoSyncOnOpen?'checked':''}> Automatically refresh the current tracked playlist when opened</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-historyscan" ${s.historyScan?'checked':''}> Match YouTube History page videos to known episodes</label>
@@ -1323,7 +1386,9 @@
     p.querySelectorAll('[data-play]').forEach(b=>b.addEventListener('click',()=>{if(b.disabled)return;const s=db.series.find(x=>x.id===b.dataset.sid),e=s?.episodes.find(x=>x.id===b.dataset.play);if(s&&e)openEpisode(s,e);}));
     p.querySelectorAll('[data-order]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.order);if(!s)return;s.playbackReverse=!s.playbackReverse;saveDB();renderPanel();toast('Episode order: '+(s.playbackReverse?'chronological':'playlist')+'.');}));
     p.querySelectorAll('[data-continue]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.continue);if(s)openEpisode(s,chooseContinue(s));}));
-    p.querySelectorAll('[data-mark]').forEach(b=>b.addEventListener('click',()=>{const id=b.dataset.mark;markEpisode(id,!stateFor(id).watched);}));
+    p.querySelectorAll('[data-mark]').forEach(b=>b.addEventListener('click',()=>{const id=b.dataset.mark;markEpisode(id,!isWatched(id));}));
+    p.querySelectorAll('[data-through]').forEach(b=>b.addEventListener('click',()=>{const series=db.series.find(item=>item.id===b.dataset.sid);const ep=series?.episodes.find(item=>item.id===b.dataset.through);if(series&&ep)markThrough(series,ep);}));
+    p.querySelector('#yst2-undo')?.addEventListener('click',undoLastChange);
     p.querySelectorAll('[data-remove]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.remove);if(s&&confirm(`Remove “${s.title}” from the library? Progress will be retained for videos that appear in other series.`)){db.series=db.series.filter(x=>x.id!==s.id);saveDB();renderPanel();}}));
     p.querySelectorAll('[data-sync]').forEach(b=>b.addEventListener('click',async()=>{if(getPlaylistId()!==b.dataset.sync){toast('Open this series playlist first, then refresh it.');return;}await syncCurrentPlaylist();}));
     p.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.edit);if(!s)return;const n=prompt('Series name',s.title);if(n?.trim()){s.title=n.trim();saveDB();renderPanel();}}));
@@ -1331,11 +1396,12 @@
     p.querySelector('#yst2-export')?.addEventListener('click',exportBackup);
     p.querySelector('#yst2-import')?.addEventListener('click',importBackup);
     p.querySelector('#yst2-threshold')?.addEventListener('change',e=>{db.settings.watchedThreshold=Number(e.target.value);saveDB();});
+    p.querySelector('#yst2-remaining')?.addEventListener('change',e=>{db.settings.watchedRemainingSeconds=Number(e.target.value);saveDB();});
     p.querySelector('#yst2-autonext')?.addEventListener('change',e=>{db.settings.autoNext=e.target.checked;saveDB();});
     p.querySelector('#yst2-autosync')?.addEventListener('change',e=>{db.settings.autoSyncOnOpen=e.target.checked;saveDB();});
     p.querySelector('#yst2-historyscan')?.addEventListener('change',e=>{db.settings.historyScan=e.target.checked;saveDB();});
     p.querySelector('#yst2-clear')?.addEventListener('click',()=>{if(confirm('Permanently delete all series, episode progress, and history matches? Export a backup first if needed.')){db=emptyDB();saveDB();renderPanel();toast('Tracker data deleted.');}});
-    p.querySelector('#yst2-recount')?.addEventListener('click',()=>{for(const [id,st] of Object.entries(db.episodes)){if(!st.watched&&st.duration>0&&st.position/st.duration>=db.settings.watchedThreshold)setState(id,{watched:true});}renderPanel();toast('Watched status recalculated.');});
+    p.querySelector('#yst2-recount')?.addEventListener('click',()=>{rememberUndo(Object.keys(db.episodes),'recalculate completion');for(const [id,st] of Object.entries(db.episodes)){setState(id,{watched:shouldAutoComplete(st.position,st.duration,Number(db.settings.watchedThreshold),Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS)),completionOverride:'AUTO'},false);}saveDB();renderPanel();toast('Automatic completion recalculated.');});
     p.querySelector('#yst2-markall')?.addEventListener('click',()=>{const s=findSeries(getPlaylistId());if(!s){toast('Open a tracked series playlist first.');return;}if(confirm(`Mark all ${s.episodes.length} episodes watched?`)){const now=Date.now();for(const e of s.episodes){const old=stateFor(e.id);db.episodes[e.id]={...old,watched:true,position:old.duration||e.duration||old.position,duration:old.duration||e.duration||0,updatedAt:now,lastWatchedAt:old.watched?old.lastWatchedAt:now};}saveDB();renderPanel();toast('All episodes marked watched.');}});
     p.querySelector('#yst2-scanhistory')?.addEventListener('click',scanHistoryPage);
   }
@@ -1358,7 +1424,7 @@
         const id=new URL(a.href,location.origin).searchParams.get('v');if(!id||!matched.has(id))continue;
         const title=text(node.querySelector('#video-title'))||a.title||stateFor(id).title;
         db.history[id]={title,lastSeen:Date.now()};count++;
-        const st=stateFor(id);if(!st.watched)setState(id,{watched:true},false);
+        const st=stateFor(id);if(!isWatched(id))setState(id,{watched:true},false);
       }catch(_){}
     }
     saveDB();renderPanel();toast(`History scan found ${count} tracked episode(s). Scroll down to load more history, then scan again.`);
@@ -1447,7 +1513,7 @@
     const duration = Number.isFinite(video && video.duration) && video.duration > 0 ? video.duration : episode.duration || old.duration || 0;
     const position = Number.isFinite(video && video.currentTime) && video.currentTime > 0 ? video.currentTime : old.position || 0;
     const threshold = Number(db.settings.watchedThreshold);
-    const watched = old.watched || (duration > 0 && (Boolean(video && video.ended) || (threshold < 1 && position / duration >= threshold)));
+    const watched = old.completionOverride === 'WATCHED' || (old.completionOverride !== 'UNWATCHED' && (old.watched || shouldAutoComplete(position,duration,threshold,Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS),Boolean(video && video.ended))));
     setState(videoId, {
       title: episode.title || old.title,
       position: watched ? (duration || position) : position,
@@ -1676,7 +1742,7 @@
       .yst2-continue span{font-weight:400;color:#ffc0cb}.yst2-done{color:#65d6a1;padding:9px 0}.yst2-details{margin-top:9px}.yst2-details summary{cursor:pointer;color:#ddd;padding:5px 0;font-size:12px}.yst2-details summary span{color:#999;margin-left:5px}
       .yst2-ep{display:flex;align-items:center;gap:9px;padding:9px 0;border-bottom:1px solid #292a30}.yst2-thumb{width:86px;aspect-ratio:16/9;object-fit:cover;border-radius:6px;background:#292a30}.yst2-epbody{flex:1;min-width:0}
       .yst2-epname{display:block;background:none;border:0;color:#eee;text-align:left;padding:0;font-weight:650;font-size:12px;line-height:1.4;max-height:2.8em;overflow:hidden}.yst2-epbody .yst2-muted{margin-top:4px}.yst2-epbody .yst2-bar{margin-top:5px}
-      .yst2-mark{background:none;border:0;color:#aaa;font-size:19px;min-width:28px}.yst2-mark.checked{color:#62d5a0}.yst2-ep.is-watched .yst2-epname{color:#b5b5bc}
+      .yst2-mark{background:none;border:0;color:#aaa;font-size:19px;min-width:28px}.yst2-mark.checked{color:#62d5a0}.yst2-through{border:0;background:transparent;color:#aab0bf;padding:5px 7px;cursor:pointer}.yst2-through:hover{color:#ff8da3}.yst2-through:focus-visible{outline:2px solid #ff6682;outline-offset:2px}.yst2-ep.is-watched .yst2-epname{color:#b5b5bc}
       .yst2-empty{text-align:center;padding:42px 16px;color:#ddd}.yst2-empty h3{margin:10px 0 5px}.yst2-empty p{color:#a5a6b0;font-size:12px}.yst2-empty .symbol{font-size:38px;color:#ff1744}
       .yst2-setting{display:flex;align-items:center;gap:8px;margin:13px 0;font-size:12px}.yst2-setting select{margin-left:auto;background:#292a31;color:#eee;border:1px solid #444;border-radius:6px;padding:5px}
       .yst2-setting input{accent-color:#ff1744}.dangerbtn{color:#ff8b9b}.yst2-footer{padding:10px 15px;border-top:1px solid #292a30;color:#8d8f99;font-size:10px}
@@ -1800,7 +1866,7 @@
       if(!Number.isFinite(video.currentTime))return;
       const dur=Number.isFinite(video.duration)?video.duration:meta.duration;
       const old=stateFor(meta.id), threshold=Number(db.settings.watchedThreshold);
-      const watched=old.watched || (dur>0 && (video.ended || (threshold<1 && video.currentTime/dur>=threshold)));
+      const watched=old.completionOverride === 'WATCHED' || (old.completionOverride !== 'UNWATCHED' && (old.watched || shouldAutoComplete(video.currentTime,dur,threshold,Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS),video.ended)));
       setState(meta.id,{title:meta.title||old.title,position:watched?(dur||video.currentTime):video.currentTime,duration:dur||old.duration,watched},false);
       if(s) db.history[meta.id]={title:meta.title,lastSeen:Date.now()};
       saveDB();
@@ -1811,10 +1877,11 @@
     video.addEventListener('loadedmetadata',savePosition,{once:true});
     video.addEventListener('pause',savePosition);
     const onEnded=()=>{
-      setState(meta.id,{title:meta.title,position:video.duration||meta.duration,duration:video.duration||meta.duration,watched:true},false);
+      const previous = stateFor(meta.id);
+      setState(meta.id,{title:meta.title,position:video.duration||meta.duration,duration:video.duration||meta.duration,watched:previous.completionOverride !== 'UNWATCHED'},false);
       if(s) db.history[meta.id]={title:meta.title,lastSeen:Date.now()};
       saveDB();
-      if(db.settings.autoNext && s) {
+      if(db.settings.autoNext && s && isWatched(meta.id)) {
         const next=chooseNext(s,meta.id,currentOccurrence&&currentOccurrence.order);
         if(next && next.id!==meta.id) {
           toast(`Playing next episode: ${next.title}`);
