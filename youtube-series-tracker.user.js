@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Series Tracker
 // @namespace    https://github.com/GraveEaterMadison/youtube-series-tracker
-// @version      2.5.1
+// @version      2.6.0
 // @description  Build YouTube series from playlists or add individual videos, with automatic default series names, local progress, watched status, history matching, and optional auto-next.
 // @author       Zero
 // @license      MIT
@@ -25,7 +25,18 @@
   const AUTO_WATCHED_DEFAULT = 0.92;
   const AUTO_WATCHED_REMAINING_SECONDS = 30;
   let lastUndo = null;
-  const SAVE_MS = 2000;
+  const SAVE_MS = 5000;
+  const UNDO_WINDOW_MS = 8000;
+  const MAX_BACKUP_CHARS = 8 * 1024 * 1024;
+  const MAX_BACKUP_SERIES = 500;
+  const MAX_BACKUP_EPISODES = 50000;
+  const PLAYER_PREV_BTN = 'yst2-player-previous';
+  const PLAYER_NEXT_BTN = 'yst2-player-next';
+  const PLAYLIST_BTN = 'yst2-playlist-action';
+  let undoExpiryTimer = null;
+  let activePlaybackSession = null;
+  let staleRefreshBusy = false;
+  let staleRefreshTimer = null;
   const AUTO_SYNC_KEY = 'yst2-last-sync';
   let db = loadDB();
   let activeTab = 'library';
@@ -52,7 +63,11 @@
         autoNext: false,
         autoSyncOnOpen: true,
         showSidebarButton: true,
-        historyScan: true
+        historyScan: true,
+        catalogAutoRefresh: true,
+        recordPlaybackProgress: true,
+        importHistoryProgress: false,
+        showPlayerButton: true
       },
       series: [],
       episodes: {},
@@ -71,10 +86,23 @@
       }
       const p = raw ? JSON.parse(raw) : {};
       const base = emptyDB();
+      const series = (Array.isArray(p.series) ? p.series : []).map(item => ({
+        ...item,
+        catalogRevision: Number.isInteger(item.catalogRevision) ? item.catalogRevision : (Array.isArray(item.episodes) && item.episodes.length ? 1 : 0),
+        cursorRevision: Number.isInteger(item.cursorRevision) ? item.cursorRevision : 0,
+        newEpisodeIds: Array.isArray(item.newEpisodeIds) ? item.newEpisodeIds.filter(id => /^[A-Za-z0-9_-]{11}$/.test(id)) : [],
+        startHereVideoId: /^[A-Za-z0-9_-]{11}$/.test(String(item.startHereVideoId || '')) ? item.startHereVideoId : '',
+        startHereOrder: Number.isInteger(item.startHereOrder) ? item.startHereOrder : -1,
+        lastRefreshAttemptAt: Number(item.lastRefreshAttemptAt) || 0,
+        refreshRetryAt: Number(item.refreshRetryAt) || 0,
+        refreshError: String(item.refreshError || '').slice(0, 240),
+        recoveryRequired: Boolean(item.recoveryRequired),
+        recoveryVideoId: /^[A-Za-z0-9_-]{11}$/.test(String(item.recoveryVideoId || '')) ? item.recoveryVideoId : ''
+      }));
       return {
         ...base, ...p,
         settings: { ...base.settings, ...(p.settings || {}) },
-        series: Array.isArray(p.series) ? p.series : [],
+        series,
         episodes: p.episodes && typeof p.episodes === 'object' ? p.episodes : {},
         history: p.history && typeof p.history === 'object' ? p.history : {}
       };
@@ -148,18 +176,57 @@
     return (position / duration >= fraction && duration - position <= 90) ||
       (duration > 60 && remainingSeconds > 0 && duration - position <= remainingSeconds);
   }
+  function expireUndo(reference) {
+    if (undoExpiryTimer) clearTimeout(undoExpiryTimer);
+    undoExpiryTimer = setTimeout(() => {
+      if (lastUndo === reference) {
+        lastUndo = null;
+        undoExpiryTimer = null;
+        if (document.getElementById(PANEL)?.classList.contains('open')) renderPanel();
+      }
+    }, UNDO_WINDOW_MS + 10);
+  }
+  function shouldAutoCompletePercentage(observedPercent, duration, threshold = db.settings.watchedThreshold) {
+    if (!Number.isFinite(observedPercent) || observedPercent < Number(threshold) * 100 || observedPercent > 100 || !Number.isFinite(duration) || duration <= 0) return false;
+    return duration * (100 - observedPercent) / 100 <= 90;
+  }
   function rememberUndo(ids, description) {
     const before = {};
     for (const id of new Set(ids)) before[id] = Object.prototype.hasOwnProperty.call(db.episodes, id) ? { ...db.episodes[id] } : null;
-    lastUndo = { before, description };
+    lastUndo = { before, description, expiresAt: Date.now() + UNDO_WINDOW_MS };
+    expireUndo(lastUndo);
+  }
+  function rememberDatabaseUndo(description) {
+    lastUndo = {
+      database: {
+        series: JSON.parse(JSON.stringify(db.series)),
+        episodes: JSON.parse(JSON.stringify(db.episodes)),
+        history: JSON.parse(JSON.stringify(db.history))
+      },
+      description,
+      expiresAt: Date.now() + UNDO_WINDOW_MS
+    };
+    expireUndo(lastUndo);
   }
   function undoLastChange() {
-    if (!lastUndo) return false;
-    for (const [id, old] of Object.entries(lastUndo.before)) {
+    if (!lastUndo || Date.now() > Number(lastUndo.expiresAt || 0)) {
+      lastUndo = null;
+      if (undoExpiryTimer) clearTimeout(undoExpiryTimer);
+      undoExpiryTimer = null;
+      return false;
+    }
+    if (lastUndo.database) {
+      db.series = JSON.parse(JSON.stringify(lastUndo.database.series));
+      db.episodes = JSON.parse(JSON.stringify(lastUndo.database.episodes));
+      db.history = JSON.parse(JSON.stringify(lastUndo.database.history));
+    }
+    for (const [id, old] of Object.entries(lastUndo.before || {})) {
       if (old === null) delete db.episodes[id];
       else db.episodes[id] = { ...old };
     }
     const description = lastUndo.description;
+    if (undoExpiryTimer) clearTimeout(undoExpiryTimer);
+    undoExpiryTimer = null;
     lastUndo = null;
     saveDB();
     renderPanel();
@@ -937,13 +1004,25 @@
       series = { id: listId, playlistId: listId, title: title || 'YouTube playlist', episodes: [], addedAt: Date.now(), updatedAt: Date.now() };
       db.series.unshift(series);
     }
-    const old = new Map(series.episodes.map((e, i) => [e.id, { ...e, order: Number.isFinite(e.order) ? e.order : i }]));
+    const previousCatalog = Array.isArray(series.episodes) ? series.episodes : [];
+    const previousIds = new Set(previousCatalog.filter(ep => ep.available !== false && !ep.unavailable).map(ep => ep.id));
+    const newIds = new Set(Array.isArray(series.newEpisodeIds) ? series.newEpisodeIds : []);
+    const oldByOccurrence = new Map();
+    previousCatalog.forEach((ep,index) => {
+      const order = Number.isInteger(ep.order) ? ep.order : index;
+      oldByOccurrence.set(ep.id + ':' + order, { ...ep, order });
+    });
+    const usedOld = new Set();
     const merged = [];
     items.forEach((ep, i) => {
-      const prev = old.get(ep.id);
       const order = Number.isInteger(ep.order) && ep.order >= 0 ? ep.order : i;
+      const occurrenceKey = ep.id + ':' + order;
+      const prev = oldByOccurrence.get(occurrenceKey) || previousCatalog.find((oldEp,index) => !usedOld.has(index) && oldEp.id === ep.id);
+      const prevIndex = prev ? previousCatalog.indexOf(prev) : -1;
+      if (prevIndex >= 0) usedOld.add(prevIndex);
       const next = { ...prev, ...ep, order, unavailable: Boolean(ep.unavailable || ep.available === false) };
       merged.push(next);
+      if (previousCatalog.length && !next.unavailable && !previousIds.has(next.id)) newIds.add(next.id);
       if (!next.unavailable && /^[A-Za-z0-9_-]{11}$/.test(ep.id)) {
         const st = stateFor(ep.id);
         setState(ep.id, { title: ep.title || st.title, duration: ep.duration || st.duration }, false);
@@ -951,15 +1030,42 @@
     });
     // Keep previously-known items that may be unavailable/removed, after the verified catalog.
     let tailOrder = merged.reduce((max, ep) => Math.max(max, Number.isInteger(ep.order) ? ep.order : -1), -1) + 1;
-    for (const [id, ep] of old) {
-      if (merged.some(x => x.id === id)) continue;
+    previousCatalog.forEach((ep,index) => {
+      if (usedOld.has(index)) return;
+      if (merged.some(item => item.id === ep.id && item.order === ep.order)) return;
       merged.push({ ...ep, order: tailOrder++, unavailable: ep.manuallyAdded ? false : true });
-    }
+    });
     series.title = title || series.title;
     if (typeof series.playbackReverse !== 'boolean') series.playbackReverse = inferReverseOrder(merged);
     series.episodes = merged;
+    series.catalogRevision = (Number(series.catalogRevision) || 0) + 1;
+    series.newEpisodeIds = [...newIds].filter(id => merged.some(ep => ep.id === id && ep.available !== false && !ep.unavailable));
+    if (series.cursorVideoId) {
+      const matches = merged.filter(ep => ep.id === series.cursorVideoId && ep.available !== false && !ep.unavailable);
+      const exact = matches.find(ep => ep.order === series.cursorOrder);
+      if (exact) {
+        series.cursorRevision = series.catalogRevision;
+        series.recoveryRequired = false;
+        series.recoveryVideoId = '';
+      } else if (matches.length === 1) {
+        series.cursorOrder = matches[0].order;
+        series.cursorRevision = series.catalogRevision;
+        series.recoveryRequired = false;
+        series.recoveryVideoId = '';
+      } else {
+        series.recoveryRequired = true;
+        series.recoveryVideoId = series.cursorVideoId;
+      }
+    }
+    if (series.startHereVideoId && !merged.some(ep => ep.id === series.startHereVideoId && ep.available !== false && !ep.unavailable)) {
+      series.startHereVideoId = '';
+      series.startHereOrder = -1;
+    }
     series.updatedAt = Date.now();
     series.lastSyncedAt = Date.now();
+    series.lastRefreshAttemptAt = Date.now();
+    series.refreshRetryAt = 0;
+    series.refreshError = '';
     db.lastSync = Date.now();
     saveDB();
     return series;
@@ -1024,6 +1130,64 @@
     }
     return episodes[0] || null;
   }
+  function catalogRefreshDue(series, now = Date.now()) {
+    if (!series?.playlistId) return false;
+    const fetchedAt = Number(series.lastSyncedAt) || 0;
+    const attemptedAt = Number(series.lastRefreshAttemptAt) || 0;
+    const retryAt = Number(series.refreshRetryAt) || 0;
+    return now >= retryAt
+      && (!attemptedAt || now - attemptedAt >= 30 * 60 * 1000)
+      && (!fetchedAt || now < fetchedAt || now - fetchedAt >= 6 * 60 * 60 * 1000);
+  }
+  function resumePlan(series) {
+    const episodes = orderedEpisodes(series).filter(ep =>
+      ep.available !== false && !ep.unavailable && /^[A-Za-z0-9_-]{11}$/.test(ep.id));
+    if (!episodes.length) return { kind: 'NO_PLAYABLE', episode: null, position: 0 };
+    const startHere = series.startHereVideoId
+      ? episodes.find(ep => ep.id === series.startHereVideoId && (!Number.isInteger(series.startHereOrder) || ep.order === series.startHereOrder))
+      : null;
+    if (startHere) return { kind: 'RESUME', episode: startHere, position: 0 };
+    if (series.cursorVideoId) {
+      const matches = episodes.filter(ep => ep.id === series.cursorVideoId);
+      const exact = matches.find(ep => ep.order === series.cursorOrder);
+      const sameRevision = Number(series.cursorRevision || 0) === Number(series.catalogRevision || 0);
+      if (exact && sameRevision) {
+        if (!isWatched(exact.id)) return { kind: 'RESUME', episode: exact, position: stateFor(exact.id).position || 0 };
+        const next = episodes.find(ep => ep.order > exact.order && !isWatched(ep.id));
+        return next ? { kind: 'NEXT', episode: next, position: stateFor(next.id).position || 0 }
+          : { kind: 'CAUGHT_UP', episode: null, position: 0 };
+      }
+      if (matches.length === 1) {
+        series.cursorOrder = matches[0].order;
+        series.cursorRevision = Number(series.catalogRevision) || 0;
+        series.recoveryRequired = false;
+        series.recoveryVideoId = '';
+        saveDB();
+        if (!isWatched(matches[0].id)) return { kind: 'RESUME', episode: matches[0], position: stateFor(matches[0].id).position || 0 };
+      } else {
+        series.recoveryRequired = true;
+        series.recoveryVideoId = series.cursorVideoId;
+        return { kind: 'CHOOSE', episode: null, position: 0 };
+      }
+    }
+    const occurrences = new Map();
+    for (const ep of episodes) occurrences.set(ep.id, (occurrences.get(ep.id) || 0) + 1);
+    const recent = episodes
+      .filter(ep => !isWatched(ep.id) && stateFor(ep.id).position > 5 && occurrences.get(ep.id) === 1)
+      .sort((a,b) => (stateFor(b.id).updatedAt || 0) - (stateFor(a.id).updatedAt || 0))[0];
+    if (recent) return { kind: 'RESUME', episode: recent, position: stateFor(recent.id).position || 0 };
+    const first = episodes.find(ep => !isWatched(ep.id));
+    return first ? { kind: 'RESUME', episode: first, position: stateFor(first.id).position || 0 }
+      : { kind: 'CAUGHT_UP', episode: null, position: 0 };
+  }
+  function acknowledgeNewEpisodes(seriesId) {
+    const series = findSeries(seriesId);
+    if (!series || !series.newEpisodeIds?.length) return false;
+    series.newEpisodeIds = [];
+    saveDB();
+    renderPanel();
+    return true;
+  }
   function chooseContinue(s) {
     const eps = orderedEpisodes(s).filter(e =>
       e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
@@ -1061,6 +1225,7 @@
     s.cursorVideoId = e.id;
     s.cursorOrder = Number.isInteger(e.order) ? e.order : undefined;
     s.cursorUpdatedAt = Date.now();
+    s.cursorRevision = Number(s.catalogRevision) || 0;
     saveDB();
     location.href = urlFor(e.id, s.playlistId, s.playlistId ? e.order : undefined, resume && !startsHere && !isWatched(e.id) ? st.position : 0);
   }
@@ -1071,6 +1236,7 @@
     series.cursorVideoId = episode.id;
     series.cursorOrder = series.startHereOrder;
     series.cursorUpdatedAt = Date.now();
+    series.cursorRevision = Number(series.catalogRevision) || 0;
     saveDB();
     renderPanel();
     toast('Continue watching will start here: ' + (episode.title || 'selected episode'));
