@@ -744,3 +744,11 @@ test('History page gets a non-destructive Series entry point', () => {
   assert.match(source, /yst2-history-switcher/);
   assert.match(source, /activeTab='library'; openPanel\(\)/);
 });
+
+
+test('validated native Morphe backups retain bookmark video references', () => {
+  const validator = source.slice(source.indexOf('function validateBackupDocument(document)'), source.indexOf('function exportBackup()'));
+  assert.match(validator, /const bookmarkVideoId = \^\[A-Za-z0-9_-\]\{11\}\$/);
+  assert.match(validator, /bookmarkVideoId,/);
+  assert.match(source, /if \(db\.settings\.enabled === false \|\| !onHistory\)/);
+});
