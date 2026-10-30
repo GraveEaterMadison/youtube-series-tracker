@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Series Tracker
 // @namespace    https://github.com/GraveEaterMadison/youtube-series-tracker
-// @version      2.3.0
+// @version      2.5.1
 // @description  Build YouTube series from playlists or add individual videos, with automatic default series names, local progress, watched status, history matching, and optional auto-next.
 // @author       Zero
 // @license      MIT
@@ -22,7 +22,9 @@
   const STYLE = 'yst2-style';
   const BTN = 'yst2-button';
   const PLAYER_BTN = 'yst2-player-button';
-  const AUTO_WATCHED_DEFAULT = 0.90;
+  const AUTO_WATCHED_DEFAULT = 0.92;
+  const AUTO_WATCHED_REMAINING_SECONDS = 30;
+  let lastUndo = null;
   const SAVE_MS = 2000;
   const AUTO_SYNC_KEY = 'yst2-last-sync';
   let db = loadDB();
@@ -33,7 +35,11 @@
   let tickTimer = null;
   let routeTimer = null;
   let lastSave = 0;
+  let lastPanelRender = 0;
+  const EPISODE_BATCH_SIZE = 50;
   let syncBusy = false;
+  let playerActionBusy = false;
+  const discoveryCache = new Map();
   let currentHistoryScan = '';
   let activeVideoCleanup = null;
 
@@ -42,6 +48,7 @@
       version: VERSION,
       settings: {
         watchedThreshold: AUTO_WATCHED_DEFAULT,
+        watchedRemainingSeconds: AUTO_WATCHED_REMAINING_SECONDS,
         autoNext: false,
         autoSyncOnOpen: true,
         showSidebarButton: true,
@@ -124,7 +131,63 @@
       url: `https://www.youtube.com/watch?v=${id}`, thumb: `https://i.ytimg.com/vi/${id}/hqdefault.jpg` };
   }
   function stateFor(id) {
-    return db.episodes[id] || { watched: false, position: 0, duration: 0, title: '', updatedAt: 0, lastWatchedAt: 0 };
+    return db.episodes[id] || { watched: false, completionOverride: 'AUTO', position: 0, duration: 0, title: '', updatedAt: 0, lastWatchedAt: 0 };
+  }
+  function isWatchedState(state) {
+    if (!state) return false;
+    if (state.completionOverride === 'WATCHED') return true;
+    if (state.completionOverride === 'UNWATCHED') return false;
+    return Boolean(state.watched);
+  }
+  function isWatched(id) { return isWatchedState(stateFor(id)); }
+  function shouldAutoComplete(position, duration, threshold, remainingSeconds, ended = false) {
+    if (ended) return true;
+    if (!Number.isFinite(position) || position < 0 || !Number.isFinite(duration) || duration <= 0) return false;
+    const fraction = Math.max(0, Math.min(1, Number(threshold)));
+    // HTMLMediaElement.currentTime and duration are seconds; native Morphe code stores milliseconds.
+    return (position / duration >= fraction && duration - position <= 90) ||
+      (duration > 60 && remainingSeconds > 0 && duration - position <= remainingSeconds);
+  }
+  function rememberUndo(ids, description) {
+    const before = {};
+    for (const id of new Set(ids)) before[id] = Object.prototype.hasOwnProperty.call(db.episodes, id) ? { ...db.episodes[id] } : null;
+    lastUndo = { before, description };
+  }
+  function undoLastChange() {
+    if (!lastUndo) return false;
+    for (const [id, old] of Object.entries(lastUndo.before)) {
+      if (old === null) delete db.episodes[id];
+      else db.episodes[id] = { ...old };
+    }
+    const description = lastUndo.description;
+    lastUndo = null;
+    saveDB();
+    renderPanel();
+    toast('Undone: ' + description);
+    return true;
+  }
+  function markThrough(series, targetEpisode) {
+    if (!series || !targetEpisode) return false;
+    const playable = orderedEpisodes(series).filter(ep => ep.available !== false && !ep.unavailable && /^[A-Za-z0-9_-]{11}$/.test(ep.id));
+    const index = playable.findIndex(ep => ep.id === targetEpisode.id && ep.order === targetEpisode.order);
+    if (index < 0) return false;
+    const selected = playable.slice(0, index + 1);
+    rememberUndo(selected.map(ep => ep.id), 'mark watched through episode');
+    const now = Date.now();
+    for (const ep of selected) {
+      const old = stateFor(ep.id);
+      const already = isWatched(ep.id);
+      db.episodes[ep.id] = {
+        ...old, watched: true, completionOverride: 'WATCHED',
+        position: old.duration || ep.duration || old.position,
+        duration: old.duration || ep.duration || 0,
+        updatedAt: now, lastWatchedAt: already ? old.lastWatchedAt : now
+      };
+    }
+    saveDB();
+    renderPanel();
+    toast('Marked ' + selected.length + ' episodes watched.');
+    return true;
   }
   function setState(id, patch, persist = true) {
     const old = stateFor(id);
@@ -153,92 +216,717 @@
     if (Array.isArray(obj)) { for (const x of obj) walk(x, fn); return; }
     for (const k of Object.keys(obj)) walk(obj[k], fn);
   }
-  function videoFromRenderer(r) {
-    const v = r?.playlistVideoRenderer || r?.playlistPanelVideoRenderer;
-    if (!v?.videoId) return null;
-    const title = v.title?.runs?.map(x => x.text).join('') || v.title?.simpleText || 'Untitled episode';
-    const length = v.lengthSeconds ? Number(v.lengthSeconds) : parseDuration(v.lengthText?.simpleText);
-    const thumb = v.thumbnail?.thumbnails?.slice(-1)[0]?.url || `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`;
-    return { id: v.videoId, title, duration: length || 0, thumb, url: `https://www.youtube.com/watch?v=${v.videoId}` };
+  function rendererText(node) {
+    if (node == null) return '';
+    if (typeof node === 'string') return node;
+    if (typeof node.simpleText === 'string') return node.simpleText;
+    if (Array.isArray(node.runs)) return node.runs.map(run => String(run && run.text || '')).join('');
+    return '';
   }
-  function findPlaylistRenderer(data) {
-    const out = [];
-    walk(data, o => {
-      const ep = videoFromRenderer(o);
-      if (ep && !out.some(x => x.id === ep.id)) out.push(ep);
+
+  function isSuggestiblePlaylistId(id) {
+    const value = String(id || '').trim();
+    return /^[A-Za-z0-9_-]{2,200}$/.test(value) && !/^(?:RD|UL)/.test(value) && value !== 'WL' && value !== 'LL';
+  }
+
+  function isDiscoveryPlaylistId(id) {
+    return isSuggestiblePlaylistId(id) && !/^(?:UU|UUL)/.test(id);
+  }
+
+  function playlistRowEpisode(row, listId, ordinal) {
+    const wrapper = row && row.playlistPanelVideoWrapperRenderer;
+    const v = row && (row.playlistVideoRenderer || row.playlistPanelVideoRenderer
+      || wrapper && wrapper.primaryRenderer && wrapper.primaryRenderer.playlistPanelVideoRenderer
+      || wrapper && wrapper.playlistPanelVideoRenderer);
+    if (!v) return null;
+    const rawId = String(v.videoId || '');
+    const validId = /^[A-Za-z0-9_-]{11}$/.test(rawId);
+    const title = rendererText(v.title) || (validId ? 'Untitled episode' : 'Unavailable video');
+    const overlays = Array.isArray(v.thumbnailOverlays) ? v.thumbnailOverlays : [];
+    const upcoming = Boolean(v.upcomingEventData) || overlays.some(item => item && item.thumbnailOverlayTimeStatusRenderer && item.thumbnailOverlayTimeStatusRenderer.style === 'UPCOMING');
+    const unavailableTitle = title === '[Private video]' || title === '[Deleted video]';
+    const available = validId && v.isPlayable !== false && !upcoming && !unavailableTitle;
+    const safeList = String(listId || 'playlist').replace(/[^A-Za-z0-9_-]/g, '_');
+    const id = validId ? rawId : '__yst_unavailable__' + safeList + '_' + String(ordinal + 1);
+    const thumbnails = v.thumbnail && v.thumbnail.thumbnails;
+    const thumb = Array.isArray(thumbnails) && thumbnails.length ? String(thumbnails[thumbnails.length - 1].url || '') : (validId ? 'https://i.ytimg.com/vi/' + rawId + '/hqdefault.jpg' : '');
+    const seconds = v.lengthSeconds ? Number(v.lengthSeconds) : parseDuration(rendererText(v.lengthText));
+    const displayedIndex = Number(rendererText(v.index));
+    const order = Number.isInteger(displayedIndex) && displayedIndex > 0 ? displayedIndex - 1 : ordinal;
+    return { id, title, duration: Number.isFinite(seconds) ? Math.max(0, seconds) : 0, thumb, url: available ? 'https://www.youtube.com/watch?v=' + rawId : '', order, available, unavailable: !available, videoInfo: rendererText(v.videoInfo) };
+  }
+
+  function playlistTitleFromPayload(data) {
+    return rendererText(data && data.metadata && data.metadata.playlistMetadataRenderer && data.metadata.playlistMetadataRenderer.title)
+      || rendererText(data && data.header && data.header.playlistHeaderRenderer && data.header.playlistHeaderRenderer.title)
+      || String(data && data.header && data.header.pageHeaderRenderer && data.header.pageHeaderRenderer.pageTitle || '')
+      || rendererText(data && data.header && data.header.playlistSidebarPrimaryInfoRenderer && data.header.playlistSidebarPrimaryInfoRenderer.title)
+      || '';
+  }
+
+  function playlistPanelFor(data, listId) {
+    let found = null;
+    walk(data, node => {
+      const panel = node && node.playlistPanelRenderer;
+      if (!found && panel && String(panel.playlistId || '') === listId && Array.isArray(panel.contents)) found = panel;
     });
-    return out;
+    return found;
   }
-  function titleFromData(data) {
-    let title = '';
-    walk(data, o => {
-      if (title) return;
-      const h = o.playlistMetadataRenderer?.title || o.playlistSidebarPrimaryInfoRenderer?.title?.runs?.map(x=>x.text).join('');
-      if (h) title = h;
-    });
-    return title;
+
+  function selectedPlaylistContent(data) {
+    const root = data && data.contents && (data.contents.singleColumnBrowseResultsRenderer || data.contents.twoColumnBrowseResultsRenderer);
+    const tabs = root && root.tabs;
+    if (Array.isArray(tabs) && tabs.length) {
+      const selected = tabs.find(tab => tab && tab.tabRenderer && tab.tabRenderer.selected) || tabs[0];
+      return selected && selected.tabRenderer && selected.tabRenderer.content || root;
+    }
+    return root || data && data.contents || data;
   }
-  function continuationToken(data) {
-    let token = '';
-    walk(data, o => {
-      if (token) return;
-      if (o.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token)
-        token = o.continuationItemRenderer.continuationEndpoint.continuationCommand.token;
-    });
-    return token;
+
+  function findPlaylistVideoListRenderer(node, depth) {
+    depth = depth || 0;
+    if (!node || typeof node !== 'object' || depth > 18) return null;
+    if (node.playlistVideoListRenderer && Array.isArray(node.playlistVideoListRenderer.contents)) return node.playlistVideoListRenderer;
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const result = findPlaylistVideoListRenderer(child, depth + 1);
+        if (result) return result;
+      }
+      return null;
+    }
+    for (const key of ['sectionListRenderer', 'itemSectionRenderer', 'contents', 'content', 'tabs', 'tabRenderer']) {
+      if (node[key] === undefined) continue;
+      const result = findPlaylistVideoListRenderer(node[key], depth + 1);
+      if (result) return result;
+    }
+    return null;
   }
+
+  function playlistContinuation(container, rows) {
+    const tokens = new Set();
+    const continuations = container && container.continuations;
+    if (Array.isArray(continuations)) {
+      for (const item of continuations) {
+        const token = item && item.nextContinuationData && item.nextContinuationData.continuation || item && item.nextRadioContinuationData && item.nextRadioContinuationData.continuation || '';
+        if (token) tokens.add(token);
+      }
+    }
+    for (const row of rows || []) {
+      const token = row && row.continuationItemRenderer && row.continuationItemRenderer.continuationEndpoint && row.continuationItemRenderer.continuationEndpoint.continuationCommand && row.continuationItemRenderer.continuationEndpoint.continuationCommand.token;
+      if (token) tokens.add(token);
+    }
+    if (tokens.size > 1) throw new Error('YouTube returned ambiguous playlist continuation tokens; no partial catalog was saved.');
+    return tokens.values().next().value || '';
+  }
+
+  function parsePlaylistRows(rows, listId, offset, container) {
+    if (!Array.isArray(rows)) throw new Error('YouTube did not return a recognized playlist episode list.');
+    const items = [];
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') throw new Error('YouTube returned an invalid playlist row; no partial catalog was saved.');
+      if (row.playlistVideoRenderer || row.playlistPanelVideoRenderer || row.playlistPanelVideoWrapperRenderer) {
+        const episode = playlistRowEpisode(row, listId, offset + items.length);
+        if (episode) items.push(episode);
+        continue;
+      }
+      if (row.continuationItemRenderer) continue;
+      const banner = rendererText(row.messageRenderer && row.messageRenderer.text);
+      if (banner && /unavailable videos will be hidden|no videos available/i.test(banner)) continue;
+      const keys = Object.keys(row);
+      throw new Error('Unsupported playlist row (' + (keys[0] || 'unknown') + '); refresh stopped to avoid saving an incomplete episode list.');
+    }
+    return { items, token: playlistContinuation(container, rows) };
+  }
+
+  function parsePlaylistPage(data, listId, continuation, offset) {
+    continuation = Boolean(continuation);
+    offset = Number(offset || 0);
+    if (!data || typeof data !== 'object' || data.error) throw new Error('YouTube returned an invalid playlist response.');
+    let container = null;
+    if (continuation) {
+      container = data.continuationContents && (data.continuationContents.playlistVideoListContinuation || data.continuationContents.playlistPanelContinuation) || null;
+      if (!container) {
+        const actions = data.onResponseReceivedActions || data.onResponseReceivedEndpoints || [];
+        for (const action of actions) {
+          const append = action && action.appendContinuationItemsAction;
+          if (append && Array.isArray(append.continuationItems)) {
+            container = { contents: append.continuationItems, continuations: [] };
+            break;
+          }
+        }
+      }
+      if (!container || !Array.isArray(container.contents)) throw new Error('YouTube continuation did not contain playlist rows.');
+    } else {
+      const panel = playlistPanelFor(data, listId);
+      if (panel) container = panel;
+      else {
+        const renderer = findPlaylistVideoListRenderer(selectedPlaylistContent(data), 0);
+        if (renderer) container = renderer;
+      }
+      if (!container || !Array.isArray(container.contents)) throw new Error('YouTube did not return the requested playlist. It may be private, unavailable, or YouTube may have changed its page structure.');
+    }
+    const parsed = parsePlaylistRows(container.contents, listId, offset, container);
+    return { items: parsed.items, token: parsed.token, title: playlistTitleFromPayload(data), visitorData: String(data.responseContext && data.responseContext.visitorData || '') };
+  }
+
+  async function requestInnerTube(endpoint, payload, budget) {
+    if (endpoint !== 'browse' && endpoint !== 'search') throw new Error('Unsupported YouTube endpoint.');
+    const key = getApiKey();
+    if (!key) throw new Error('YouTube did not expose its InnerTube key. Reload the page and try again.');
+    const remaining = budget.deadline - Date.now();
+    if (remaining <= 0 || budget.requests >= budget.maxRequests || budget.bytes >= budget.maxBytes) throw new Error('YouTube catalog discovery reached its request, time, or size limit. No partial series was saved.');
+    budget.requests++;
+    const controller = new AbortController();
+    const timeoutMs = Math.max(1000, Math.min(12000, remaining));
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const context = getClientContext();
+      const client = context && context.client || {};
+      const version = String(client.clientVersion || '2.20260101.00.00');
+      const response = await fetch('/youtubei/v1/' + endpoint + '?key=' + encodeURIComponent(key) + '&prettyPrint=false', {
+        method: 'POST',
+        credentials: 'same-origin',
+        signal: controller.signal,
+        headers: { 'Content-Type': 'application/json', 'X-Youtube-Client-Name': '1', 'X-Youtube-Client-Version': version },
+        body: JSON.stringify({ context, ...payload })
+      });
+      const length = Number(response.headers && response.headers.get && response.headers.get('content-length') || 0);
+      if (length > budget.pageBytes) throw new Error('YouTube returned a response larger than the safe page limit.');
+      const body = await response.text();
+      const size = new TextEncoder().encode(body).length;
+      budget.bytes += size;
+      if (size > budget.pageBytes || budget.bytes > budget.maxBytes) throw new Error('YouTube playlist response exceeded the safe download limit. Existing episodes were kept.');
+      if (response.status === 429 || response.status === 503) throw new Error('YouTube is temporarily rate-limiting playlist discovery (HTTP ' + response.status + '). Try again later.');
+      if (!response.ok) throw new Error('YouTube playlist request failed (HTTP ' + response.status + ').');
+      try { return JSON.parse(body); } catch (_) { throw new Error('YouTube returned malformed playlist data. No partial catalog was saved.'); }
+    } catch (error) {
+      if (error && error.name === 'AbortError') throw new Error('YouTube playlist request timed out. No partial catalog was saved.');
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function fetchFullPlaylist(listId, options) {
+    options = options || {};
+    if (!isSuggestiblePlaylistId(listId)) throw new Error('This YouTube list is a mix, Watch Later, or another list type that cannot be followed as a series.');
+    const budget = options.budget || { requests: 0, bytes: 0, maxRequests: 100, maxBytes: 20 * 1024 * 1024, pageBytes: 5 * 1024 * 1024, deadline: Date.now() + 60000 };
+    const maxPages = Number.isFinite(options.maxPages) ? options.maxPages : 100;
+    let first = null;
+    let firstError = null;
+    for (const params of ['wgYCCAA%3D', '']) {
+      try {
+        const payload = { browseId: 'VL' + listId };
+        if (params) payload.params = params;
+        const response = await requestInnerTube('browse', payload, budget);
+        first = parsePlaylistPage(response, listId, false, 0);
+        break;
+      } catch (error) {
+        firstError = error;
+        if (Date.now() >= budget.deadline || budget.requests >= budget.maxRequests || budget.bytes >= budget.maxBytes) break;
+      }
+    }
+    if (!first) throw firstError || new Error('Could not load the complete playlist catalog.');
+    const items = [];
+    let title = first.title || '';
+    const appendItems = pageItems => {
+      for (const item of pageItems) {
+        if (!item || !item.id) continue;
+        const order = Number.isInteger(item.order) && item.order >= 0 ? item.order : items.length;
+        items.push({ ...item, order });
+        if (items.length > 5000) throw new Error('Playlist contains more than 5,000 rows; no partial catalog was saved.');
+      }
+    };
+    appendItems(first.items);
+    let token = first.token;
+    let pages = 0;
+    const seenTokens = new Set();
+    while (token) {
+      if (pages >= maxPages) throw new Error('Playlist catalog remains incomplete after ' + pages + ' continuation pages; no partial catalog was saved.');
+      if (seenTokens.has(token)) throw new Error('YouTube repeated a continuation token; no partial catalog was saved.');
+      seenTokens.add(token);
+      pages++;
+      const response = await requestInnerTube('browse', { continuation: token }, budget);
+      const page = parsePlaylistPage(response, listId, true, items.length);
+      if (page.title) title = page.title;
+      appendItems(page.items);
+      token = page.token;
+    }
+    if (!items.length) throw new Error('No episodes were found in this playlist.');
+    if (Date.now() >= budget.deadline) throw new Error('Playlist catalog exceeded its time limit; no partial catalog was saved.');
+    const domTitle = listId === getPlaylistId() ? playlistTitleFromDOM() : '';
+    const inferredTitle = listId === getPlaylistId() ? (seriesSearchTitle(videoTitle()) || videoTitle()) : '';
+    return { items, title: title || domTitle || inferredTitle, pages };
+  }
+
   function playlistTitleFromDOM() {
-    return text(document.querySelector('ytd-playlist-header-renderer #title')) ||
-      text(document.querySelector('ytd-playlist-header-renderer h1')) ||
-      text(document.querySelector('ytd-playlist-sidebar-primary-info-renderer h1')) ||
-      document.title.replace(/\s+-\s+YouTube$/, '').trim() || 'YouTube playlist';
+    return text(document.querySelector('ytd-playlist-header-renderer #title'))
+      || text(document.querySelector('ytd-playlist-header-renderer h1'))
+      || text(document.querySelector('ytd-playlist-sidebar-primary-info-renderer h1'))
+      || text(document.querySelector('ytd-playlist-panel-renderer #header-description #view-more'))
+      || (location.pathname.startsWith('/playlist') ? document.title.replace(/\s+-\s+YouTube$/, '').trim() : '')
+      || '';
   }
-  function domPlaylistItems() {
-    const out = [], seen = new Set();
-    const selectors = 'ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer, ytd-rich-item-renderer, ytd-video-renderer';
-    for (const node of document.querySelectorAll(selectors)) {
+
+  function domPlaylistItems(listId) {
+    listId = listId || getPlaylistId();
+    const out = [];
+    const seen = new Set();
+    for (const node of document.querySelectorAll('ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer')) {
+      if (node.matches('ytd-playlist-panel-video-renderer')) {
+        const panel = node.closest('ytd-playlist-panel-renderer');
+        const panelId = panel && (panel.getAttribute('playlist-id') || panel.data && panel.data.playlistId) || '';
+        if (panelId && panelId !== listId) continue;
+      }
       const a = node.querySelector('a#video-title, a#thumbnail[href*="watch"], a[href*="/watch?v="]');
       if (!a) continue;
-      let u; try { u = new URL(a.getAttribute('href'), location.origin); } catch (_) { continue; }
-      const id = u.searchParams.get('v');
-      if (!id || seen.has(id)) continue;
-      if (location.pathname === '/watch' && !node.closest('ytd-playlist-panel-renderer') && !node.matches('ytd-playlist-video-renderer')) continue;
+      let u;
+      try { u = new URL(a.getAttribute('href'), location.origin); } catch (_) { continue; }
+      const id = u.searchParams.get('v') || '';
+      if (!/^[A-Za-z0-9_-]{11}$/.test(id) || seen.has(id)) continue;
       seen.add(id);
       const title = text(node.querySelector('#video-title')) || a.title || 'Untitled episode';
       const durationNode = node.querySelector('ytd-thumbnail-overlay-time-status-renderer, #overlays #text');
-      out.push({ id, title, duration: parseDuration(text(durationNode)), thumb: node.querySelector('img')?.src || `https://i.ytimg.com/vi/${id}/hqdefault.jpg`, url: `https://www.youtube.com/watch?v=${id}` });
+      out.push({ id, title, duration: parseDuration(text(durationNode)), thumb: node.querySelector('img') && node.querySelector('img').src || 'https://i.ytimg.com/vi/' + id + '/hqdefault.jpg', url: 'https://www.youtube.com/watch?v=' + id, order: out.length, available: true, unavailable: false });
     }
     return out;
   }
-  async function fetchFullPlaylist(listId) {
-    if (!listId) throw new Error('Open a playlist URL containing list= first.');
-    const data = getInitialData();
-    let items = data ? findPlaylistRenderer(data) : [];
-    // YouTube's playlist renderer may be nested inside initial data; include currently-rendered items too.
-    const dom = domPlaylistItems();
-    const seen = new Set(items.map(x => x.id));
-    for (const ep of dom) if (!seen.has(ep.id)) { items.push(ep); seen.add(ep.id); }
-    let token = data ? continuationToken(data) : '';
-    const key = getApiKey();
-    let pages = 0;
-    while (token && key && pages < 60) {
-      pages++;
-      const response = await fetch(`/youtubei/v1/browse?key=${encodeURIComponent(key)}&prettyPrint=false`, {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json', 'X-Youtube-Client-Name': '1', 'X-Youtube-Client-Version': getClientContext().client?.clientVersion || '2.20260101.00.00' },
-        body: JSON.stringify({ context: getClientContext(), continuation: token })
-      });
-      if (!response.ok) throw new Error(`YouTube playlist request failed (${response.status}).`);
-      const next = await response.json();
-      for (const ep of findPlaylistRenderer(next)) {
-        if (!seen.has(ep.id)) { items.push(ep); seen.add(ep.id); }
-      }
-      token = continuationToken(next);
-      if (!findPlaylistRenderer(next).length && token && pages > 3) break;
+  function seriesSearchTitle(title) {
+    const value = String(title || '').replace(/\[[^\]]*\]|\([^)]*(?:sub|dub|1080p|720p|official|english)[^)]*\)/gi, ' ');
+    const season = /\b(?:season|series)\s*0*(\d{1,3})\b/i.exec(value);
+    const parts = value.split(/[|｜]/).map(part => part.trim()).filter(Boolean).map(part => part
+      .replace(/\bS\d{1,3}[ ._-]*E\d{1,4}\b/gi, ' ')
+      .replace(/(?:\b(?:episode|ep\.?|part|chapter)|épisode)\s*#?\s*\d{1,4}\b/giu, ' ')
+      .replace(/\b\d{1,4}\s*\/\s*\d{1,4}\b/g, ' ')
+      .replace(/\b(?:full\s+episodes?|official\s+video|english\s+sub(?:titles?)?|english\s+dub|subbed|dubbed|1080p|720p|4k|hd)\b/gi, ' ')
+      .replace(/\s+/g, ' ').trim()).filter(Boolean);
+    let name = parts.sort((a,b) => b.length - a.length)[0] || '';
+    if (season && name && !new RegExp('\\b(?:season|series)\\s*0*' + season[1] + '\\b', 'i').test(name)) {
+      name = (name + ' Season ' + season[1]).trim();
     }
-    // Preserve YouTube order as provided by the playlist renderer.
-    return { items, title: titleFromData(data) || playlistTitleFromDOM(), pages };
+    return name.slice(0, 160);
   }
+
+  function episodeNumberFromTitle(title) {
+    const value = String(title || '');
+    const compact = /\bS(\d{1,3})[ ._-]*E(\d{1,4})\b/i.exec(value);
+    if (compact) {
+      if (/\bS\d{1,3}[ ._-]*E\d{1,4}\b/i.test(value.slice(compact.index + compact[0].length))) return null;
+      return Number(compact[1]) * 10000 + Number(compact[2]);
+    }
+    const all = [...value.matchAll(/(?:\b(?:episode|ep\.?|part|chapter)|épisode)\s*#?\s*(\d{1,4})\b/giu)];
+    if (all.length !== 1) return null;
+    const season = /\b(?:season|series|saison)\s*0*(\d{1,3})\b/i.exec(value);
+    return (season ? Number(season[1]) : 0) * 10000 + Number(all[0][1]);
+  }
+
+  function episodeAgeRange(metadata) {
+    const agePattern = /^(?:streamed |premiered )?(\d{1,6})\s+(second|minute|hour|day|week|month|year)s? ago$/i;
+    for (const part of String(metadata || '').split(/[•·]/)) {
+      const match = agePattern.exec(part.trim());
+      if (!match) continue;
+      const count = Number(match[1]);
+      const unit = match[2].toLowerCase();
+      let low, high;
+      switch (unit) {
+        case 'second': low = high = 1; break;
+        case 'minute': low = high = 60; break;
+        case 'hour': low = high = 3600; break;
+        case 'day': low = high = 86400; break;
+        case 'week': low = high = 604800; break;
+        case 'month': low = 28 * 86400; high = 31 * 86400; break;
+        default: low = 365 * 86400; high = 366 * 86400; break;
+      }
+      return [count * low, (count + 1) * high];
+    }
+    return null;
+  }
+
+  function inferReverseOrder(items) {
+    const playable = [];
+    const seen = new Set();
+    for (const item of items || []) {
+      if (!item || item.available === false || item.unavailable || !/^[A-Za-z0-9_-]{11}$/.test(item.id) || seen.has(item.id)) continue;
+      seen.add(item.id);
+      playable.push(item);
+    }
+    if (playable.length < 2) return false;
+
+    const numbered = playable.map(item => ({
+      number: episodeNumberFromTitle(item.title),
+      seasonal: /\b(?:season|series|saison)\s*0*\d{1,3}\b/i.test(item.title)
+    })).filter(item => Number.isFinite(item.number));
+    if (numbered.length >= 2 && numbered.length * 5 >= playable.length * 3) {
+      const seasonal = numbered[0].seasonal;
+      if (numbered.some(item => item.seasonal !== seasonal)) return false;
+      let direction = 0;
+      for (let i = 1; i < numbered.length; i++) {
+        const next = Math.sign(numbered[i].number - numbered[i - 1].number);
+        if (!next || (direction && next !== direction)) return false;
+        direction = next;
+      }
+      return direction < 0;
+    }
+
+    let dated = 0;
+    let votes = 0;
+    let direction = 0;
+    let earliestUpper = Number.MAX_SAFE_INTEGER;
+    let latestLower = Number.MIN_SAFE_INTEGER;
+    for (const item of playable) {
+      const age = episodeAgeRange(item.videoInfo);
+      if (!age) continue;
+      dated++;
+      const older = age[0] >= earliestUpper;
+      const newer = age[1] <= latestLower;
+      if (older && newer) return false;
+      const next = older ? -1 : newer ? 1 : 0;
+      if (next) {
+        if (direction && next !== direction) return false;
+        direction = next;
+        votes++;
+      }
+      earliestUpper = Math.min(earliestUpper, age[1]);
+      latestLower = Math.max(latestLower, age[0]);
+    }
+    if (dated < 3 || dated * 5 < playable.length * 3 || votes < 2) return false;
+    return direction < 0;
+  }
+  function orderedEpisodes(series) {
+    const episodes = [...(series && series.episodes || [])].sort((a,b) => a.order - b.order);
+    return series && series.playbackReverse ? episodes.reverse() : episodes;
+  }
+
+  function playlistIdsInDescription(description) {
+    const ids = [];
+    const seen = new Set();
+    const urls = /https?:\/\/[^\s<>"']+/g;
+    let match;
+    while ((match = urls.exec(String(description || '').slice(0, 20000))) && ids.length < 4) {
+      try {
+        const parsed = new URL(match[0].replace(/[).,;]+$/, ''));
+        const id = parsed.searchParams.get('list') || '';
+        if (isDiscoveryPlaylistId(id) && !seen.has(id)) {
+          seen.add(id);
+          ids.push(id);
+        }
+      } catch (_) {}
+    }
+    return ids;
+  }
+
+  function currentVideoDetails(videoId) {
+    let playerResponse = null;
+    try {
+      const player = document.getElementById('movie_player');
+      playerResponse = player && typeof player.getPlayerResponse === 'function' ? player.getPlayerResponse() : null;
+    } catch (_) {}
+    const initial = window.ytInitialPlayerResponse;
+    const details = playerResponse && playerResponse.videoDetails
+      || initial && initial.videoDetails;
+    if (details && details.videoId === videoId) {
+      const descriptionNode = document.querySelector('#description-inline-expander #content, ytd-text-inline-expander #content-text, #description ytd-text-inline-expander');
+      const descriptionLinks = descriptionNode ? [...descriptionNode.querySelectorAll('a[href]')].map(a => a.href).join(' ') : '';
+      return {
+        id: videoId,
+        title: String(details.title || videoTitle()),
+        author: String(details.author || ''),
+        channelId: String(details.channelId || ''),
+        description: String(details.shortDescription || '') + ' ' + descriptionLinks
+      };
+    }
+    const channel = document.querySelector('ytd-video-owner-renderer a[href*="/channel/"], #owner #channel-name a');
+    const descriptionNode = document.querySelector('#description-inline-expander #content, ytd-text-inline-expander #content-text, #description ytd-text-inline-expander');
+    let channelId = '';
+    try {
+      if (channel && channel.href) {
+        const url = new URL(channel.href, location.origin);
+        channelId = url.pathname.split('/channel/')[1]?.split(/[/?#]/)[0] || '';
+      }
+    } catch (_) {}
+    const descriptionText = descriptionNode ? text(descriptionNode) : '';
+    const descriptionLinks = descriptionNode ? [...descriptionNode.querySelectorAll('a[href]')].map(a => a.href).join(' ') : '';
+    return {
+      id: videoId,
+      title: videoTitle(),
+      author: text(channel),
+      channelId,
+      description: (descriptionText + ' ' + descriptionLinks).slice(0, 20000)
+    };
+  }
+  function normalizeSearchTokens(value) {
+    return String(value || '').toLocaleLowerCase().split(/[^\p{L}\p{N}]+/u).filter(word => word.length > 2);
+  }
+
+  function parsePlaylistSearchCandidates(data, details) {
+    const results = new Map();
+    const expectedTitle = seriesSearchTitle(details.title).toLocaleLowerCase();
+    const expectedTokens = new Set(normalizeSearchTokens(expectedTitle));
+    const expectedSeason = /\b(?:season|series|saison)\s*0*(\d{1,3})\b/i.exec(details.title)?.[1] || '';
+    let visited = 0;
+
+    const addCandidate = (id, title, owner, thumb, ownerMatches) => {
+      id = String(id || '');
+      if (!isDiscoveryPlaylistId(id) || results.has(id)) return;
+      title = String(title || id);
+      owner = String(owner || '');
+      const titleTokens = new Set(normalizeSearchTokens(title));
+      let overlap = 0;
+      for (const token of expectedTokens) if (titleTokens.has(token)) overlap++;
+      let score = ownerMatches ? 1000 : 0;
+      score += overlap * 8;
+      if (expectedTitle && title.toLocaleLowerCase().includes(expectedTitle)) score += 60;
+      const candidateSeason = /\b(?:season|series|saison)\s*0*(\d{1,3})\b/i.exec(title)?.[1] || '';
+      if (expectedSeason && candidateSeason) score += expectedSeason === candidateSeason ? 80 : -80;
+      results.set(id, { id, title, owner, thumb: String(thumb || ''), score, items: null, reverse: false });
+    };
+
+    const visit = (node, depth) => {
+      if (!node || typeof node !== 'object' || depth > 24 || visited++ >= 20000) return;
+      if (Array.isArray(node)) {
+        for (const child of node) {
+          if (visited >= 20000) break;
+          visit(child, depth + 1);
+        }
+        return;
+      }
+
+      const lockup = node.lockupViewModel;
+      if (lockup && lockup.contentType === 'LOCKUP_CONTENT_TYPE_PLAYLIST') {
+        const metadata = lockup.metadata && lockup.metadata.lockupMetadataViewModel;
+        const title = metadata && metadata.title && metadata.title.content || '';
+        const imageSources = lockup.contentImage && lockup.contentImage.thumbnailViewModel
+          && lockup.contentImage.thumbnailViewModel.image && lockup.contentImage.thumbnailViewModel.image.sources;
+        const thumb = Array.isArray(imageSources) && imageSources.length ? imageSources[imageSources.length - 1].url : '';
+        addCandidate(lockup.contentId, title, '', thumb, false);
+      }
+
+      for (const key of ['playlistRenderer', 'compactPlaylistRenderer', 'gridPlaylistRenderer']) {
+        const playlist = node[key];
+        if (!playlist) continue;
+        const byline = playlist.shortBylineText || playlist.longBylineText || playlist.ownerText || null;
+        const owner = rendererText(byline);
+        let ownerMatches = false;
+        for (const run of byline && byline.runs || []) {
+          const browseId = run && run.navigationEndpoint && run.navigationEndpoint.browseEndpoint && run.navigationEndpoint.browseEndpoint.browseId || '';
+          if (details.channelId && browseId === details.channelId) ownerMatches = true;
+        }
+        const thumbnails = playlist.thumbnail && playlist.thumbnail.thumbnails;
+        const thumb = Array.isArray(thumbnails) && thumbnails.length ? thumbnails[thumbnails.length - 1].url : '';
+        addCandidate(playlist.playlistId, rendererText(playlist.title), owner, thumb, ownerMatches);
+      }
+
+      for (const key of Object.keys(node)) {
+        if (visited >= 20000) break;
+        visit(node[key], depth + 1);
+      }
+    };
+
+    visit(data && (data.contents || data), 0);
+    return [...results.values()].sort((a,b) => b.score - a.score).slice(0, 30);
+  }
+
+  function channelBrowseTabs(data) {
+    const contents = data && data.contents || {};
+    const browse = contents.twoColumnBrowseResultsRenderer || contents.singleColumnBrowseResultsRenderer || {};
+    return Array.isArray(browse.tabs) ? browse.tabs : [];
+  }
+
+  function channelPlaylistEndpoint(data, channelId) {
+    const externalId = data && data.metadata && data.metadata.channelMetadataRenderer
+      && data.metadata.channelMetadataRenderer.externalId || '';
+    if (externalId !== channelId) return '';
+    for (const tab of channelBrowseTabs(data)) {
+      const renderer = tab && tab.tabRenderer;
+      const endpoint = renderer && renderer.endpoint && renderer.endpoint.browseEndpoint;
+      if (renderer && renderer.title === 'Playlists'
+          && endpoint && endpoint.browseId === channelId && endpoint.params) return String(endpoint.params);
+    }
+    return '';
+  }
+
+  function scopedContinuationTokens(root) {
+    const tokens = new Set();
+    let visits = 0;
+    const visit = (node, depth) => {
+      if (!node || typeof node !== 'object' || depth > 18 || visits++ >= 10000) return;
+      if (Array.isArray(node)) {
+        for (const child of node) {
+          if (visits >= 10000) break;
+          visit(child, depth + 1);
+        }
+        return;
+      }
+      const direct = node.continuationItemRenderer
+        && node.continuationItemRenderer.continuationEndpoint
+        && node.continuationItemRenderer.continuationEndpoint.continuationCommand
+        && node.continuationItemRenderer.continuationEndpoint.continuationCommand.token;
+      if (direct) tokens.add(String(direct));
+      if (Array.isArray(node.continuations)) {
+        for (const item of node.continuations) {
+          const token = item && item.nextContinuationData && item.nextContinuationData.continuation;
+          if (token) tokens.add(String(token));
+        }
+      }
+      for (const key of ['sectionListRenderer','itemSectionRenderer','gridRenderer','richGridRenderer','richItemRenderer','content','contents','items','continuationItemRenderer','appendContinuationItemsAction','gridContinuation']) {
+        if (node[key] !== undefined) visit(node[key], depth + 1);
+      }
+    };
+    visit(root, 0);
+    return tokens;
+  }
+
+  async function channelPlaylistCandidates(details, budget) {
+    const channelId = String(details.channelId || '');
+    if (!/^UC[A-Za-z0-9_-]{22}$/.test(channelId)) return [];
+    try {
+      const home = await requestInnerTube('browse', { browseId: channelId }, budget);
+      const params = channelPlaylistEndpoint(home, channelId);
+      if (!params) return [];
+      let response = await requestInnerTube('browse', { browseId: channelId, params }, budget);
+      const externalId = response && response.metadata && response.metadata.channelMetadataRenderer
+        && response.metadata.channelMetadataRenderer.externalId || '';
+      if (externalId !== channelId) return [];
+
+      const findPlaylistTab = payload => {
+        const tabs = channelBrowseTabs(payload);
+        return tabs.find(tab => tab && tab.tabRenderer && tab.tabRenderer.title === 'Playlists'
+          && tab.tabRenderer.selected)
+          || tabs.find(tab => tab && tab.tabRenderer && tab.tabRenderer.title === 'Playlists')
+          || null;
+      };
+      const selected = findPlaylistTab(response);
+      if (!selected || !selected.tabRenderer || !selected.tabRenderer.content) return [];
+      const allCandidates = new Map();
+      const ingest = root => {
+        for (const candidate of parsePlaylistSearchCandidates({ contents: root }, details)) {
+          allCandidates.set(candidate.id, {
+            ...candidate,
+            owner: candidate.owner || details.author || 'Channel playlists',
+            // This channel's Playlists tab was verified against the video's own channel.
+            score: candidate.score + 1000
+          });
+          if (allCandidates.size >= 96) break;
+        }
+      };
+      let content = selected.tabRenderer.content;
+      ingest(content);
+      let tokens = scopedContinuationTokens(content);
+      let pages = 0;
+      const seenTokens = new Set();
+      while (tokens.size === 1 && pages < 2 && allCandidates.size < 96
+          && budget.requests < budget.maxRequests && Date.now() < budget.deadline) {
+        const token = tokens.values().next().value;
+        if (!token || seenTokens.has(token)) break;
+        seenTokens.add(token);
+        pages++;
+        response = await requestInnerTube('browse', { continuation: token }, budget);
+        let nextRoot = response && response.continuationContents && response.continuationContents.gridContinuation;
+        if (!nextRoot) {
+          const actions = response && (response.onResponseReceivedActions || response.onResponseReceivedEndpoints) || [];
+          for (const action of actions) {
+            const append = action && action.appendContinuationItemsAction;
+            if (append && Array.isArray(append.continuationItems)) {
+              nextRoot = { contents: append.continuationItems };
+              break;
+            }
+          }
+        }
+        if (!nextRoot) break;
+        ingest(nextRoot);
+        tokens = scopedContinuationTokens(nextRoot);
+      }
+      return [...allCandidates.values()].sort((a,b) => b.score - a.score).slice(0, 30);
+    } catch (error) {
+      console.debug('[YouTube Series] channel playlist discovery unavailable:', error && error.message || error);
+      return [];
+    }
+  }
+
+
+  async function discoverPlaylistsForVideo(videoId) {
+    const cached = discoveryCache.get(videoId);
+    if (cached && cached.expiresAt > Date.now()) return cached.matches;
+    const details = currentVideoDetails(videoId);
+    const budget = {
+      requests: 0,
+      bytes: 0,
+      maxRequests: 18,
+      maxBytes: 16 * 1024 * 1024,
+      pageBytes: 5 * 1024 * 1024,
+      deadline: Date.now() + 25000
+    };
+    const verified = [];
+    const checked = new Set();
+    const linked = playlistIdsInDescription(details.description);
+    const verifyCandidate = async candidate => {
+      if (checked.has(candidate.id) || budget.requests >= budget.maxRequests || Date.now() >= budget.deadline) return;
+      checked.add(candidate.id);
+      try {
+        const catalog = await fetchFullPlaylist(candidate.id, { budget, maxPages: 18 });
+        if (!catalog.items.some(item => item.id === videoId && item.available !== false && !item.unavailable)) return;
+        verified.push({
+          id: candidate.id,
+          title: catalog.title || candidate.title || seriesSearchTitle(details.title) || details.title || candidate.id,
+          owner: candidate.owner || '',
+          thumb: catalog.items.find(item => item.available !== false && !item.unavailable)?.thumb || candidate.thumb || '',
+          items: catalog.items,
+          reverse: inferReverseOrder(catalog.items),
+          score: Number(candidate.score || 0)
+        });
+      } catch (error) {
+        console.debug('[YouTube Series] candidate catalog could not be verified:', candidate.id, error && error.message || error);
+      }
+    };
+    for (const id of linked) await verifyCandidate({ id, title: '', owner: '', thumb: '', score: 2000 });
+    if (verified.length) {
+      const matches = verified.sort((a,b) => b.score - a.score);
+      discoveryCache.set(videoId, { expiresAt: Date.now() + 60 * 60 * 1000, matches });
+      return matches;
+    }
+    if (details.channelId && budget.requests < budget.maxRequests && Date.now() < budget.deadline) {
+      const channelCandidates = await channelPlaylistCandidates(details, budget);
+      for (const candidate of channelCandidates.slice(0, 8)) {
+        if (budget.requests >= budget.maxRequests || Date.now() >= budget.deadline) break;
+        await verifyCandidate(candidate);
+        if (verified.length >= 4) break;
+      }
+      if (verified.length) {
+        const matches = verified.sort((a,b) => b.score - a.score);
+        discoveryCache.set(videoId, { expiresAt: Date.now() + 60 * 60 * 1000, matches });
+        return matches;
+      }
+    }
+
+    const seriesTitle = seriesSearchTitle(details.title) || details.title;
+    const queries = [...new Set([
+      (details.author ? details.author + ' ' : '') + seriesTitle,
+      (details.author ? details.author + ' ' : '') + details.title
+    ].map(value => value.trim().slice(0, 180)).filter(value => value.length >= 3))].slice(0, 2);
+    const candidates = new Map();
+    for (const query of queries) {
+      if (budget.requests >= budget.maxRequests || Date.now() >= budget.deadline) break;
+      try {
+        const response = await requestInnerTube('search', { query, params: 'EgIQAw==' }, budget);
+        for (const candidate of parsePlaylistSearchCandidates(response, details)) {
+          const previous = candidates.get(candidate.id);
+          if (!previous || candidate.score > previous.score) candidates.set(candidate.id, candidate);
+        }
+      } catch (error) {
+        console.debug('[YouTube Series] playlist search unavailable:', error && error.message || error);
+        break;
+      }
+    }
+    for (const candidate of [...candidates.values()].sort((a,b) => b.score - a.score).slice(0, 8)) {
+      if (budget.requests >= budget.maxRequests || Date.now() >= budget.deadline) break;
+      await verifyCandidate(candidate);
+      if (verified.length >= 4) break;
+    }
+    const matches = verified.sort((a,b) => b.score - a.score);
+    discoveryCache.set(videoId, { expiresAt: Date.now() + (matches.length ? 60 : 5) * 60 * 1000, matches });
+    return matches;
+  }
+
   function findSeries(id) {
     if (!id) return undefined;
     return db.series.find(s => (s.playlistId && s.playlistId === id) || s.id === id);
@@ -253,14 +941,22 @@
     const merged = [];
     items.forEach((ep, i) => {
       const prev = old.get(ep.id);
-      const next = { ...prev, ...ep, order: i };
+      const order = Number.isInteger(ep.order) && ep.order >= 0 ? ep.order : i;
+      const next = { ...prev, ...ep, order, unavailable: Boolean(ep.unavailable || ep.available === false) };
       merged.push(next);
-      const st = stateFor(ep.id);
-      setState(ep.id, { title: ep.title || st.title, duration: ep.duration || st.duration }, false);
+      if (!next.unavailable && /^[A-Za-z0-9_-]{11}$/.test(ep.id)) {
+        const st = stateFor(ep.id);
+        setState(ep.id, { title: ep.title || st.title, duration: ep.duration || st.duration }, false);
+      }
     });
-    // Keep previously-known items that may be unavailable/removed, at the end.
-    for (const [id, ep] of old) if (!merged.some(x => x.id === id)) merged.push({ ...ep, order: merged.length, unavailable: ep.manuallyAdded ? false : true });
+    // Keep previously-known items that may be unavailable/removed, after the verified catalog.
+    let tailOrder = merged.reduce((max, ep) => Math.max(max, Number.isInteger(ep.order) ? ep.order : -1), -1) + 1;
+    for (const [id, ep] of old) {
+      if (merged.some(x => x.id === id)) continue;
+      merged.push({ ...ep, order: tailOrder++, unavailable: ep.manuallyAdded ? false : true });
+    }
     series.title = title || series.title;
+    if (typeof series.playbackReverse !== 'boolean') series.playbackReverse = inferReverseOrder(merged);
     series.episodes = merged;
     series.updatedAt = Date.now();
     series.lastSyncedAt = Date.now();
@@ -281,57 +977,130 @@
       toast(`Synced “${s.title}” · ${s.episodes.length} episodes${pages ? ` · ${pages} continuation pages` : ''}`);
     } catch (e) {
       console.error('[YouTube Series] playlist sync failed', e);
-      const dom = domPlaylistItems();
-      if (dom.length) {
-        const s = mergeSeries(id, playlistTitleFromDOM(), dom);
-        renderPanel(); toast(`Partial sync: ${s.episodes.length} loaded episodes. Full sync failed: ${e.message}`);
-      } else toast(e.message || 'Playlist sync failed.');
+      toast((e.message || 'Playlist sync failed.') + ' Existing saved episodes were kept; no partial catalog was saved.');
     } finally { syncBusy = false; }
   }
   function stats(s) {
     const eps = s.episodes || [];
-    const watched = eps.filter(e => stateFor(e.id).watched).length;
-    const active = eps.filter(e => !stateFor(e.id).watched && stateFor(e.id).position > 5).length;
-    const left = eps.reduce((n,e) => { const st=stateFor(e.id); return n + (st.watched ? 0 : Math.max(0,(st.duration||e.duration||0)-(st.position||0))); },0);
-    return { total: eps.length, watched, active, pct: eps.length ? Math.round(watched/eps.length*100) : 0, left };
+    const playable = eps.filter(e => e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
+    const watched = playable.filter(e => isWatched(e.id)).length;
+    const active = playable.filter(e => !isWatched(e.id) && stateFor(e.id).position > 5).length;
+    const left = playable.reduce((n,e) => {
+      const st = stateFor(e.id);
+      return n + (isWatched(e.id) ? 0 : Math.max(0, (st.duration || e.duration || 0) - (st.position || 0)));
+    }, 0);
+    return {
+      total: eps.length,
+      playable: playable.length,
+      watched,
+      active,
+      pct: playable.length ? Math.round(watched / playable.length * 100) : 0,
+      left
+    };
   }
   function progress(e) {
+    if (e.unavailable || e.available === false || !/^[A-Za-z0-9_-]{11}$/.test(e.id)) return 0;
     const st = stateFor(e.id);
-    if (st.watched) return 100;
+    if (isWatched(e.id)) return 100;
     const d = st.duration || e.duration || 0;
     return d ? Math.max(0, Math.min(99, st.position / d * 100)) : 0;
   }
-  function chooseContinue(s) {
-    const eps = [...(s.episodes || [])].sort((a,b) => a.order-b.order);
-    return eps.find(e => !stateFor(e.id).watched && stateFor(e.id).position > 5) ||
-      eps.find(e => !stateFor(e.id).watched) || null;
+  function currentPlaylistIndex(url) {
+    try {
+      const value = new URL(url || location.href, location.origin).searchParams.get('index');
+      const index = Number(value);
+      return Number.isInteger(index) && index > 0 ? index - 1 : -1;
+    } catch (_) {
+      return -1;
+    }
   }
-  function chooseNext(s, id) {
-    const eps = [...(s.episodes || [])].sort((a,b) => a.order-b.order);
-    const idx = eps.findIndex(e => e.id === id);
-    if (idx >= 0) return eps.slice(idx+1).find(e => !stateFor(e.id).watched) || null;
+
+  function episodeOccurrence(series, videoId, requestedOrder) {
+    const episodes = (series && series.episodes || []).filter(e =>
+      e && e.id === videoId && e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
+    if (Number.isInteger(requestedOrder) && requestedOrder >= 0) {
+      const exact = episodes.find(e => e.order === requestedOrder);
+      if (exact) return exact;
+    }
+    return episodes[0] || null;
+  }
+  function chooseContinue(s) {
+    const eps = orderedEpisodes(s).filter(e =>
+      e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
+    const startHere = s && s.startHereVideoId
+      ? eps.find(e => e.id === s.startHereVideoId && (!Number.isInteger(s.startHereOrder) || e.order === s.startHereOrder))
+      : null;
+    if (startHere) return startHere;
+    const cursorIndex = s && s.cursorVideoId
+      ? eps.findIndex(e => e.id === s.cursorVideoId && (!Number.isInteger(s.cursorOrder) || e.order === s.cursorOrder))
+      : -1;
+    if (cursorIndex >= 0) {
+      const cursor = eps[cursorIndex];
+      if (!isWatched(cursor.id)) return cursor;
+      const afterCursor = eps.slice(cursorIndex + 1).find(e => !isWatched(e.id));
+      if (afterCursor) return afterCursor;
+    }
+    return eps.find(e => !isWatched(e.id) && stateFor(e.id).position > 5) ||
+      eps.find(e => !isWatched(e.id)) || null;
+  }
+  function chooseNext(s, id, requestedOrder) {
+    const eps = orderedEpisodes(s).filter(e =>
+      e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
+    let idx = Number.isInteger(requestedOrder)
+      ? eps.findIndex(e => e.id === id && e.order === requestedOrder)
+      : -1;
+    if (idx < 0) idx = eps.findIndex(e => e.id === id);
+    if (idx >= 0) return eps.slice(idx + 1).find(e => !isWatched(e.id)) || null;
     return chooseContinue(s);
   }
   function openEpisode(s, e, resume = true) {
-    if (!s || !e) return;
+    if (!s || !e || e.unavailable || e.available === false || !/^[A-Za-z0-9_-]{11}$/.test(e.id)) return;
     const st = stateFor(e.id);
-    location.href = urlFor(e.id, s.playlistId, s.playlistId ? e.order : undefined, resume && !st.watched ? st.position : 0);
+    const startsHere = s.startHereVideoId === e.id && (!Number.isInteger(s.startHereOrder) || s.startHereOrder === e.order);
+    if (startsHere) { s.startHereVideoId = ''; s.startHereOrder = -1; }
+    s.cursorVideoId = e.id;
+    s.cursorOrder = Number.isInteger(e.order) ? e.order : undefined;
+    s.cursorUpdatedAt = Date.now();
+    saveDB();
+    location.href = urlFor(e.id, s.playlistId, s.playlistId ? e.order : undefined, resume && !startsHere && !isWatched(e.id) ? st.position : 0);
+  }
+  function setSeriesStartHere(series, episode) {
+    if (!series || !episode || episode.available === false || episode.unavailable || !/^[A-Za-z0-9_-]{11}$/.test(episode.id)) return false;
+    series.startHereVideoId = episode.id;
+    series.startHereOrder = Number.isInteger(episode.order) ? episode.order : -1;
+    series.cursorVideoId = episode.id;
+    series.cursorOrder = series.startHereOrder;
+    series.cursorUpdatedAt = Date.now();
+    saveDB();
+    renderPanel();
+    toast('Continue watching will start here: ' + (episode.title || 'selected episode'));
+    return true;
   }
   function markEpisode(id, watched) {
+    if (!/^[A-Za-z0-9_-]{11}$/.test(id)) return;
     const st = stateFor(id);
-    setState(id, { watched, position: watched ? (st.duration || st.position) : 0 });
+    rememberUndo([id], watched ? 'mark episode watched' : 'mark episode unwatched');
+    setState(id, { watched, completionOverride: watched ? 'WATCHED' : 'UNWATCHED', position: watched ? (st.duration || st.position) : 0 });
     renderPanel();
+    toast('Episode status updated. Use Undo to reverse.');
   }
   function episodeHTML(s,e) {
-    const st = stateFor(e.id), p = progress(e);
-    const status = st.watched ? 'Watched' : st.position > 5 ? `${Math.round(p)}% watched · ${fmt(st.position)} / ${fmt(st.duration || e.duration)}` : 'Not watched';
-    return `<article class="yst2-ep ${st.watched?'is-watched':''}">
-      <img class="yst2-thumb" loading="lazy" src="${esc(e.thumb || `https://i.ytimg.com/vi/${e.id}/hqdefault.jpg`)}">
-      <div class="yst2-epbody"><button class="yst2-epname" data-play="${esc(e.id)}" data-sid="${esc(s.id)}">${esc(e.title || st.title || e.id)}</button>
-      <div class="yst2-muted">${esc(status)}${(st.duration||e.duration)?` · ${fmt(st.duration||e.duration)}`:''}</div>
-      <div class="yst2-bar"><i style="width:${p}%"></i></div></div>
-      <button class="yst2-mark ${st.watched?'checked':''}" data-mark="${esc(e.id)}" title="${st.watched?'Mark unwatched':'Mark watched'}">${st.watched?'✓':'○'}</button>
-    </article>`;
+    const unavailable = Boolean(e.unavailable || e.available === false || !/^[A-Za-z0-9_-]{11}$/.test(e.id));
+    const st = unavailable ? { watched:false, position:0, duration:e.duration||0 } : stateFor(e.id);
+    const watched = !unavailable && isWatched(e.id);
+    const p = progress(e);
+    const status = unavailable ? 'Unavailable on YouTube' : watched ? 'Watched' : st.position > 5 ? Math.round(p) + '% watched · ' + fmt(st.position) + ' / ' + fmt(st.duration || e.duration) : 'Not watched';
+    const thumbnail = e.thumb || (/^[A-Za-z0-9_-]{11}$/.test(e.id) ? 'https://i.ytimg.com/vi/' + e.id + '/hqdefault.jpg' : '');
+    return '<article class="yst2-ep ' + (watched ? 'is-watched' : '') + (unavailable ? ' is-unavailable' : '') + '">'
+      + (thumbnail ? '<img class="yst2-thumb" loading="lazy" alt="" src="' + esc(thumbnail) + '">' : '<div class="yst2-thumb yst2-thumb-empty" aria-hidden="true">—</div>')
+      + '<div class="yst2-epbody"><button class="yst2-epname" data-play="' + esc(e.id) + '" data-sid="' + esc(s.id) + '" data-order="' + esc(e.order) + '"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>'
+      + esc(e.title || (unavailable ? 'Unavailable video' : st.title || e.id)) + '</button>'
+      + '<div class="yst2-muted">' + esc(status) + (!unavailable && (st.duration || e.duration) ? ' · ' + fmt(st.duration || e.duration) : '') + '</div>'
+      + '<div class="yst2-bar"><i style="width:' + p + '%"></i></div></div>'
+      + '<button class="yst2-mark ' + (watched ? 'checked' : '') + '" data-mark="' + esc(e.id) + '" title="' + (watched ? 'Mark unwatched' : 'Mark watched') + '"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>' + (watched ? '✓' : '○') + '</button>'
+      + '<button class="yst2-through" data-through="' + esc(e.id) + '" data-sid="' + esc(s.id) + '" data-order="' + esc(e.order) + '" title="Mark watched through this episode" aria-label="Mark watched through this episode"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>⇢</button>'
+      + '<button class="yst2-start-here" data-start-here="' + esc(e.id) + '" data-sid="' + esc(s.id) + '" data-order="' + esc(e.order) + '" title="Continue this series from this episode" aria-label="Continue this series from this episode"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>↳</button>'
+      + '</article>';
   }
   function saveVideoToSeries(series, meta) {
     if (!series || !meta) return false;
@@ -451,32 +1220,94 @@
 
   function seriesHTML(s) {
     const st = stats(s), cont = chooseContinue(s);
-    const cover = s.episodes[0]?.thumb || (s.episodes[0]?.id ? `https://i.ytimg.com/vi/${s.episodes[0].id}/hqdefault.jpg` : '');
-    return `<section class="yst2-series yst2-filter-item">
-      <div class="yst2-series-overview">
-        <div class="yst2-series-art">${cover ? `<img loading="lazy" src="${esc(cover)}" alt="">` : '<div class="yst2-series-art-placeholder">▶</div>'}<span>${st.total} eps</span></div>
-        <div class="yst2-series-info">
-          <header class="yst2-serieshead">
-            <div class="yst2-seriestitle">${esc(s.title)}</div>
-            ${s.playlistId ? `<button class="yst2-icon" data-sync="${esc(s.id)}" title="Refresh entire playlist" aria-label="Refresh ${esc(s.title)}">↻</button>` : '<span class="yst2-manual-label">Manual</span>'}
-            <button class="yst2-icon" data-edit="${esc(s.id)}" title="Rename series" aria-label="Rename ${esc(s.title)}">✎</button>
-            <button class="yst2-icon danger" data-remove="${esc(s.id)}" title="Remove series" aria-label="Remove ${esc(s.title)}">×</button>
-          </header>
-          <div class="yst2-muted">${st.watched}/${st.total} watched <span class="yst2-dot">·</span> ${st.active} in progress</div>
-          <div class="yst2-bar big" role="progressbar" aria-label="${esc(s.title)} progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${st.pct}"><i style="width:${st.pct}%"></i></div>
-          <div class="yst2-series-footline"><span class="yst2-progress-label">${st.pct}% complete</span>${st.left ? `<span>${fmt(st.left)} left</span>` : ''}</div>
-          ${cont ? `<button class="yst2-continue" data-continue="${esc(s.id)}"><span class="yst2-continue-icon">▶</span><span class="yst2-continue-copy"><strong>Continue watching</strong><small>${esc(cont.title)}</small></span><span class="yst2-continue-arrow">↗</span></button>` : '<div class="yst2-done">✓ All episodes watched</div>'}
-        </div>
-      </div>
-      <details class="yst2-details"><summary><span>Episodes</span><span class="yst2-summary-count">${st.total}</span><span class="yst2-summary-spacer"></span><span class="yst2-summary-hint">View list</span><span class="yst2-chevron">⌄</span></summary>
-        <div class="yst2-episode-list">${[...s.episodes].sort((a,b)=>a.order-b.order).map(e=>episodeHTML(s,e)).join('')}</div>
-      </details>
-    </section>`;
+    const coverEpisode = orderedEpisodes(s).find(e => e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
+    const cover = coverEpisode?.thumb || (coverEpisode?.id ? 'https://i.ytimg.com/vi/' + coverEpisode.id + '/hqdefault.jpg' : '');
+    return '<section class="yst2-series yst2-filter-item" data-series-card="' + esc(s.id) + '">'
+      + '<div class="yst2-series-overview">'
+      + '<div class="yst2-series-art">' + (cover ? '<img loading="lazy" src="' + esc(cover) + '" alt="">' : '<div class="yst2-series-art-placeholder">▶</div>') + '<span>' + st.total + ' eps</span></div>'
+      + '<div class="yst2-series-info"><header class="yst2-serieshead">'
+      + '<div class="yst2-seriestitle">' + esc(s.title) + '</div>'
+      + (s.playlistId ? '<button class="yst2-icon" data-sync="' + esc(s.id) + '" title="Refresh entire playlist" aria-label="Refresh ' + esc(s.title) + '">↻</button>' : '<span class="yst2-manual-label">Manual</span>')
+      + '<button class="yst2-icon" data-hide-watched="' + esc(s.id) + '" title="' + (s.hideWatched ? 'Show watched episodes' : 'Hide watched episodes') + '" aria-label="' + (s.hideWatched ? 'Show watched episodes' : 'Hide watched episodes') + '">' + (s.hideWatched ? '◉' : '◌') + '</button>'
+      + '<button class="yst2-icon" data-order="' + esc(s.id) + '" title="' + (s.playbackReverse ? 'Use playlist order' : 'Use chronological episode order') + '" aria-label="Change episode order">⇅</button>'
+      + '<button class="yst2-icon" data-edit="' + esc(s.id) + '" title="Rename series" aria-label="Rename ' + esc(s.title) + '">✎</button>'
+      + '<button class="yst2-icon danger" data-remove="' + esc(s.id) + '" title="Remove series" aria-label="Remove ' + esc(s.title) + '">×</button>'
+      + '</header><div class="yst2-muted">' + st.watched + '/' + st.playable + ' playable watched <span class="yst2-dot">·</span> ' + st.active + ' in progress</div>'
+      + '<div class="yst2-bar big" role="progressbar" aria-label="' + esc(s.title) + ' progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + st.pct + '"><i style="width:' + st.pct + '%"></i></div>'
+      + '<div class="yst2-series-footline"><span class="yst2-progress-label">' + st.pct + '% complete</span>' + (st.left ? '<span>' + fmt(st.left) + ' left</span>' : '') + '</div>'
+      + (cont ? '<button class="yst2-continue" data-continue="' + esc(s.id) + '"><span class="yst2-continue-icon">▶</span><span class="yst2-continue-copy"><strong>Continue watching</strong><small>' + esc(cont.title) + '</small></span><span class="yst2-continue-arrow">↗</span></button>' : '<div class="yst2-done">✓ All episodes watched</div>')
+      + '</div></div>'
+      + '<details class="yst2-details" data-series-details="' + esc(s.id) + '"><summary><span>Episodes</span><span class="yst2-summary-count">' + st.total + '</span><span class="yst2-summary-spacer"></span><span class="yst2-summary-hint">View list</span><span class="yst2-chevron">⌄</span></summary>'
+      + '<div class="yst2-episode-list" data-episode-list="' + esc(s.id) + '" data-offset="0"></div>'
+      + '<button class="yst2-subbtn yst2-load-more" type="button" data-load-more="' + esc(s.id) + '" hidden>Load more episodes</button>'
+      + '</details></section>';
   }
+  function bindEpisodeBatch(article) {
+    const play = article.querySelector('[data-play]');
+    play?.addEventListener('click', () => {
+      if (play.disabled) return;
+      const series = db.series.find(item => item.id === play.dataset.sid);
+      const episode = series?.episodes.find(item => item.id === play.dataset.play && item.available !== false && !item.unavailable);
+      if (series && episode) openEpisode(series, episode);
+    });
+    const mark = article.querySelector('[data-mark]');
+    mark?.addEventListener('click', () => {
+      if (!mark.disabled) markEpisode(mark.dataset.mark, !isWatched(mark.dataset.mark));
+    });
+    const through = article.querySelector('[data-through]');
+    through?.addEventListener('click', () => {
+      if (through.disabled) return;
+      const series = db.series.find(item => item.id === through.dataset.sid);
+      const episode = series?.episodes.find(item => item.id === through.dataset.through && item.order === Number(through.dataset.order));
+      if (series && episode) markThrough(series, episode);
+    });
+    const start = article.querySelector('[data-start-here]');
+    start?.addEventListener('click', () => {
+      if (start.disabled) return;
+      const series = db.series.find(item => item.id === start.dataset.sid);
+      const episode = series?.episodes.find(item => item.id === start.dataset.startHere && item.order === Number(start.dataset.order));
+      if (series && episode) setSeriesStartHere(series, episode);
+    });
+  }
+
+  function appendEpisodeBatch(details, requestedTotal) {
+    const series = db.series.find(item => item.id === details.dataset.seriesDetails);
+    const list = details.querySelector('[data-episode-list]');
+    const more = details.querySelector('[data-load-more]');
+    if (!series || !list || !more) return;
+    const episodes = orderedEpisodes(series).filter(episode => !series.hideWatched || !isWatched(episode.id));
+    const offset = list.children.length;
+    if (offset >= episodes.length) {
+      more.hidden = true;
+      return;
+    }
+    const target = Number.isInteger(requestedTotal)
+      ? Math.min(episodes.length, Math.max(offset + 1, requestedTotal))
+      : Math.min(episodes.length, offset + EPISODE_BATCH_SIZE);
+    const batch = episodes.slice(offset, target);
+    const html = batch.map(episode => episodeHTML(series, episode)).join('');
+    list.insertAdjacentHTML('beforeend', html);
+    for (const article of Array.from(list.children).slice(offset)) bindEpisodeBatch(article);
+    list.dataset.offset = String(list.children.length);
+    const remaining = episodes.length - list.children.length;
+    more.hidden = remaining <= 0;
+    more.textContent = remaining > 0 ? 'Load next ' + Math.min(EPISODE_BATCH_SIZE, remaining) + ' (' + remaining + ' remaining)' : 'All episodes loaded';
+  }
+
   function renderPanel() {
     const p = document.getElementById(PANEL); if (!p) return;
-    const total = db.series.reduce((n,s)=>n+s.episodes.length,0);
-    const watched = db.series.reduce((n,s)=>n+s.episodes.filter(e=>stateFor(e.id).watched).length,0);
+    const episodeUiState = new Map();
+    p.querySelectorAll('details[data-series-details]').forEach(details => {
+      const list = details.querySelector('[data-episode-list]');
+      episodeUiState.set(details.dataset.seriesDetails, {
+        open: details.open,
+        loaded: list ? list.children.length : 0,
+        scrollTop: list ? list.scrollTop : 0
+      });
+    });
+    const allEpisodes = db.series.flatMap(s => s.episodes || []).filter(e => e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
+    const total = allEpisodes.length;
+    const watched = allEpisodes.filter(e => isWatched(e.id)).length;
     const allCont = db.series.map(s=>({s,e:chooseContinue(s)})).filter(x=>x.e);
     const pct = total ? Math.round(watched / total * 100) : 0;
     const historyCount = Object.keys(db.history).length;
@@ -513,8 +1344,23 @@
       ${activeTab === 'settings' ? '' : `<div class="yst2-searchwrap"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"></circle><path d="m16 16 5 5"></path></svg><input id="yst2-search" type="search" value="${esc(librarySearch)}" placeholder="${activeTab==='history'?'Search history matches':'Search series and episodes'}" aria-label="Search ${activeTab==='history'?'history matches':'series and episodes'}"><kbd>⌕</kbd></div>`}
       <div id="yst2-search-empty" class="yst2-search-empty" hidden>No matches. Try another title.</div>
       <div class="yst2-content">${body}</div>
-      <footer class="yst2-footer"><span class="yst2-privacy"><span></span> Stored locally in this browser</span><span>${db.lastSync?`Synced ${new Date(db.lastSync).toLocaleDateString()}`:'Not synced yet'}</span></footer>`;
+      <footer class="yst2-footer"><span class="yst2-privacy"><span></span> Stored locally in this browser</span><span>${db.lastSync?`Synced ${new Date(db.lastSync).toLocaleDateString()}`:'Not synced yet'}</span>${lastUndo?'<button id="yst2-undo" class="yst2-subbtn" type="button">Undo last change</button>':''}</footer>`;
     bindPanel();
+    for (const [id, state] of episodeUiState) {
+      const details = p.querySelector('details[data-series-details="' + CSS.escape(id) + '"]');
+      if (!details) continue;
+      details.open = state.open;
+      if (state.loaded > 0) {
+        while (details.querySelector('[data-episode-list]').children.length < state.loaded) {
+          const before = details.querySelector('[data-episode-list]').children.length;
+          appendEpisodeBatch(details, state.loaded);
+          const after = details.querySelector('[data-episode-list]').children.length;
+          if (after <= before) break;
+        }
+        const list = details.querySelector('[data-episode-list]');
+        if (list) list.scrollTop = state.scrollTop;
+      }
+    }
   }
   function settingsHTML() {
     const s = db.settings;
@@ -522,8 +1368,10 @@
       <label class="yst2-setting">Mark watched at <select id="yst2-threshold">
         ${[[0.5,'50%'],[0.75,'75%'],[0.9,'90%'],[0.95,'95%'],[1,'Video ends only']].map(([v,l])=>`<option value="${v}" ${Number(s.watchedThreshold)===v?'selected':''}>${l}</option>`).join('')}
       </select></label>
+      <label class="yst2-setting">Complete when this much time remains <select id="yst2-remaining">${[[0,'Disabled'],[15,'15 seconds'],[30,'30 seconds'],[60,'1 minute'],[90,'90 seconds']].map(([v,l])=>`<option value="${v}" ${Number(s.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS)===v?'selected':''}>${l}</option>`).join('')}</select></label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-autonext" ${s.autoNext?'checked':''}> Automatically play the next unwatched episode when a tracked episode ends</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-autosync" ${s.autoSyncOnOpen?'checked':''}> Automatically refresh the current tracked playlist when opened</label>
+      <label class="yst2-setting"><input type="checkbox" id="yst2-sidebar" ${s.showSidebarButton!==false?'checked':''}> Show Series in YouTube navigation</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-historyscan" ${s.historyScan?'checked':''}> Match YouTube History page videos to known episodes</label>
       <p class="yst2-muted">Progress is stored in this Firefox profile on YouTube. It does not sync to Morphe or your Google account. You can export a backup at any time.</p>
       <button id="yst2-clear" class="yst2-subbtn dangerbtn">Delete all series and progress</button></section>
@@ -546,7 +1394,11 @@
       const query = librarySearch.trim().toLocaleLowerCase();
       let visible = 0;
       p.querySelectorAll('.yst2-filter-item').forEach(item => {
-        const show = !query || item.textContent.toLocaleLowerCase().includes(query);
+        let haystack = item.textContent.toLocaleLowerCase();
+        const seriesId = item.dataset.seriesCard || item.querySelector('[data-continue]')?.dataset.continue || '';
+        const series = seriesId ? db.series.find(value => value.id === seriesId) : null;
+        if (series) haystack += ' ' + [series.title, ...series.episodes.map(ep => ep.title || '')].join(' ').toLocaleLowerCase();
+        const show = !query || haystack.includes(query);
         item.hidden = !show;
         if (show) visible++;
       });
@@ -557,10 +1409,23 @@
     applySearch();
     p.querySelector('#yst2-add-current')?.addEventListener('click', showAddVideoDialog);
     p.querySelector('#yst2-sync')?.addEventListener('click', syncCurrentPlaylist);
+    p.querySelectorAll('details[data-series-details]').forEach(details => {
+      details.addEventListener('toggle', () => {
+        if (details.open && details.querySelector('[data-episode-list]')?.children.length === 0) {
+          appendEpisodeBatch(details);
+        }
+      });
+      details.querySelector('[data-load-more]')?.addEventListener('click', () => appendEpisodeBatch(details));
+    });
     p.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>{activeTab=b.dataset.tab;renderPanel();if(activeTab==='history')scanHistoryPage();}));
-    p.querySelectorAll('[data-play]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.sid),e=s?.episodes.find(x=>x.id===b.dataset.play);if(s&&e)openEpisode(s,e);}));
+    p.querySelectorAll('[data-play]').forEach(b=>b.addEventListener('click',()=>{if(b.disabled)return;const s=db.series.find(x=>x.id===b.dataset.sid),e=s?.episodes.find(x=>x.id===b.dataset.play);if(s&&e)openEpisode(s,e);}));
+    p.querySelectorAll('[data-hide-watched]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.hideWatched);if(!s)return;s.hideWatched=!s.hideWatched;saveDB();renderPanel();toast(s.hideWatched?'Watched episodes hidden.':'Watched episodes shown.');}));
+    p.querySelectorAll('[data-order]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.order);if(!s)return;s.playbackReverse=!s.playbackReverse;saveDB();renderPanel();toast('Episode order: '+(s.playbackReverse?'chronological':'playlist')+'.');}));
     p.querySelectorAll('[data-continue]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.continue);if(s)openEpisode(s,chooseContinue(s));}));
-    p.querySelectorAll('[data-mark]').forEach(b=>b.addEventListener('click',()=>{const id=b.dataset.mark;markEpisode(id,!stateFor(id).watched);}));
+    p.querySelectorAll('[data-mark]').forEach(b=>b.addEventListener('click',()=>{const id=b.dataset.mark;markEpisode(id,!isWatched(id));}));
+    p.querySelectorAll('[data-through]').forEach(b=>b.addEventListener('click',()=>{const series=db.series.find(item=>item.id===b.dataset.sid);const ep=series?.episodes.find(item=>item.id===b.dataset.through&&item.order===Number(b.dataset.order));if(series&&ep)markThrough(series,ep);}));
+    p.querySelectorAll('[data-start-here]').forEach(b=>b.addEventListener('click',()=>{const series=db.series.find(item=>item.id===b.dataset.sid);const ep=series?.episodes.find(item=>item.id===b.dataset.startHere&&item.order===Number(b.dataset.order));if(series&&ep)setSeriesStartHere(series,ep);}));
+    p.querySelector('#yst2-undo')?.addEventListener('click',undoLastChange);
     p.querySelectorAll('[data-remove]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.remove);if(s&&confirm(`Remove “${s.title}” from the library? Progress will be retained for videos that appear in other series.`)){db.series=db.series.filter(x=>x.id!==s.id);saveDB();renderPanel();}}));
     p.querySelectorAll('[data-sync]').forEach(b=>b.addEventListener('click',async()=>{if(getPlaylistId()!==b.dataset.sync){toast('Open this series playlist first, then refresh it.');return;}await syncCurrentPlaylist();}));
     p.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.edit);if(!s)return;const n=prompt('Series name',s.title);if(n?.trim()){s.title=n.trim();saveDB();renderPanel();}}));
@@ -568,12 +1433,14 @@
     p.querySelector('#yst2-export')?.addEventListener('click',exportBackup);
     p.querySelector('#yst2-import')?.addEventListener('click',importBackup);
     p.querySelector('#yst2-threshold')?.addEventListener('change',e=>{db.settings.watchedThreshold=Number(e.target.value);saveDB();});
+    p.querySelector('#yst2-remaining')?.addEventListener('change',e=>{db.settings.watchedRemainingSeconds=Number(e.target.value);saveDB();});
     p.querySelector('#yst2-autonext')?.addEventListener('change',e=>{db.settings.autoNext=e.target.checked;saveDB();});
     p.querySelector('#yst2-autosync')?.addEventListener('change',e=>{db.settings.autoSyncOnOpen=e.target.checked;saveDB();});
     p.querySelector('#yst2-historyscan')?.addEventListener('change',e=>{db.settings.historyScan=e.target.checked;saveDB();});
+    p.querySelector('#yst2-sidebar')?.addEventListener('change',e=>{db.settings.showSidebarButton=e.target.checked;saveDB();addSidebarButton();});
     p.querySelector('#yst2-clear')?.addEventListener('click',()=>{if(confirm('Permanently delete all series, episode progress, and history matches? Export a backup first if needed.')){db=emptyDB();saveDB();renderPanel();toast('Tracker data deleted.');}});
-    p.querySelector('#yst2-recount')?.addEventListener('click',()=>{for(const [id,st] of Object.entries(db.episodes)){if(!st.watched&&st.duration>0&&st.position/st.duration>=db.settings.watchedThreshold)setState(id,{watched:true});}renderPanel();toast('Watched status recalculated.');});
-    p.querySelector('#yst2-markall')?.addEventListener('click',()=>{const s=findSeries(getPlaylistId());if(!s){toast('Open a tracked series playlist first.');return;}if(confirm(`Mark all ${s.episodes.length} episodes watched?`)){const now=Date.now();for(const e of s.episodes){const old=stateFor(e.id);db.episodes[e.id]={...old,watched:true,position:old.duration||e.duration||old.position,duration:old.duration||e.duration||0,updatedAt:now,lastWatchedAt:old.watched?old.lastWatchedAt:now};}saveDB();renderPanel();toast('All episodes marked watched.');}});
+    p.querySelector('#yst2-recount')?.addEventListener('click',()=>{rememberUndo(Object.keys(db.episodes),'recalculate completion');for(const [id,st] of Object.entries(db.episodes)){setState(id,{watched:shouldAutoComplete(st.position,st.duration,Number(db.settings.watchedThreshold),Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS)),completionOverride:'AUTO'},false);}saveDB();renderPanel();toast('Automatic completion recalculated.');});
+    p.querySelector('#yst2-markall')?.addEventListener('click',()=>{const s=findSeries(getPlaylistId());if(!s){toast('Open a tracked series playlist first.');return;}const playable=s.episodes.filter(e=>e.available!==false&&!e.unavailable&&/^[A-Za-z0-9_-]{11}$/.test(e.id));if(confirm(`Mark all ${playable.length} playable episodes watched?`)){rememberUndo(playable.map(e=>e.id),'mark all episodes watched');const now=Date.now();for(const e of playable){const old=stateFor(e.id);const already=isWatched(e.id);db.episodes[e.id]={...old,watched:true,completionOverride:'WATCHED',position:old.duration||e.duration||old.position,duration:old.duration||e.duration||0,updatedAt:now,lastWatchedAt:already?old.lastWatchedAt:now};}saveDB();renderPanel();toast('All playable episodes marked watched.');}});
     p.querySelector('#yst2-scanhistory')?.addEventListener('click',scanHistoryPage);
   }
   function exportBackup() {
@@ -595,13 +1462,18 @@
         const id=new URL(a.href,location.origin).searchParams.get('v');if(!id||!matched.has(id))continue;
         const title=text(node.querySelector('#video-title'))||a.title||stateFor(id).title;
         db.history[id]={title,lastSeen:Date.now()};count++;
-        const st=stateFor(id);if(!st.watched)setState(id,{watched:true},false);
+        const st=stateFor(id);if(!isWatched(id))setState(id,{watched:true},false);
       }catch(_){}
     }
     saveDB();renderPanel();toast(`History scan found ${count} tracked episode(s). Scroll down to load more history, then scan again.`);
   }
   function addSidebarButton() {
     let button = document.getElementById(BTN);
+    if (db.settings.showSidebarButton === false) {
+      button?.remove();
+      document.getElementById('yst2-sidebar-wrap')?.remove();
+      return;
+    }
     if (!button) {
       button = document.createElement('button');
       button.id = BTN;
@@ -643,8 +1515,8 @@
     button.type = 'button';
     button.id = PLAYER_BTN;
     button.className = 'ytp-button yst2-player-button';
-    button.title = 'YouTube Series Tracker';
-    button.setAttribute('aria-label', 'Open YouTube Series Tracker');
+    button.title = 'Follow or open this YouTube series';
+    button.setAttribute('aria-label', 'Follow or open this YouTube series');
     button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 3.5A2.5 2.5 0 0 1 6.5 1h11A2.5 2.5 0 0 1 20 3.5v17a.5.5 0 0 1-.8.4L12 15.5l-7.2 5.4a.5.5 0 0 1-.8-.4v-17ZM7 5v2h10V5H7Zm0 4v2h7V9H7Z"/></svg>';
     button.addEventListener('click', event => {
       event.preventDefault();
@@ -654,31 +1526,235 @@
     host.appendChild(button);
   }
 
-  function openFromPlayer() {
-    const videoId = getVideoId();
-    const listId = getPlaylistId();
+  function showSeriesInLibrary(series) {
+    if (!series) return;
     activeTab = 'library';
+    librarySearch = '';
     openPanel();
-
-    // A playing video should offer the one-by-one builder first, even when its
-    // URL also contains list=. The dialog retains a separate whole-playlist action.
-    if (videoId) {
-      showAddVideoDialog();
-      return;
-    }
-
-    if (listId) {
-      const existing = findSeries(listId);
-      if (existing) {
-        toast('Series "' + existing.title + '" is already in your library.');
-        return;
-      }
-      syncCurrentPlaylist();
-      return;
-    }
-    toast('Open a YouTube video or playlist first.');
+    setTimeout(() => {
+      const panel = document.getElementById(PANEL);
+      const card = panel && [...panel.querySelectorAll('[data-series-card]')].find(node => node.dataset.seriesCard === series.id);
+      if (!card) return;
+      card.classList.add('yst2-series-highlight');
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setTimeout(() => card.classList.remove('yst2-series-highlight'), 2200);
+    }, 120);
   }
 
+  function seriesMatchesVideo(videoId) {
+    return db.series.filter(series => series.episodes.some(episode =>
+      episode.id === videoId && episode.available !== false && !episode.unavailable));
+  }
+
+  function recordCurrentProgressInSeries(series, videoId) {
+    const requestedOrder = series && series.playlistId && getPlaylistId() === series.playlistId
+      ? currentPlaylistIndex() : -1;
+    const episode = episodeOccurrence(series, videoId, requestedOrder);
+    if (!episode) return;
+    const video = document.querySelector('video');
+    const old = stateFor(videoId);
+    const duration = Number.isFinite(video && video.duration) && video.duration > 0 ? video.duration : episode.duration || old.duration || 0;
+    const position = Number.isFinite(video && video.currentTime) && video.currentTime > 0 ? video.currentTime : old.position || 0;
+    const threshold = Number(db.settings.watchedThreshold);
+    const watched = old.completionOverride === 'WATCHED' || (old.completionOverride !== 'UNWATCHED' && (old.watched || shouldAutoComplete(position,duration,threshold,Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS),Boolean(video && video.ended))));
+    setState(videoId, {
+      title: episode.title || old.title,
+      position: watched ? (duration || position) : position,
+      duration: duration || old.duration,
+      watched
+    }, false);
+    series.cursorVideoId = videoId;
+    series.cursorOrder = episode.order;
+    series.cursorUpdatedAt = Date.now();
+    db.history[videoId] = { title: episode.title || old.title, lastSeen: Date.now() };
+  }
+  function finishAutoFollow(candidate, videoId) {
+    const series = mergeSeries(candidate.id, candidate.title || seriesSearchTitle(currentVideoDetails(videoId).title) || candidate.id, candidate.items);
+    if (typeof series.playbackReverse !== 'boolean') {
+      series.playbackReverse = typeof candidate.reverse === 'boolean' ? candidate.reverse : inferReverseOrder(candidate.items);
+    }
+    recordCurrentProgressInSeries(series, videoId);
+    saveDB();
+    showSeriesInLibrary(series);
+    toast('Followed "' + series.title + '" · ' + series.episodes.length + ' episodes added.');
+    return series;
+  }
+
+  function showPlaylistCandidateDialog(videoId, candidates) {
+    activeTab = 'library';
+    librarySearch = '';
+    openPanel();
+    const panel = document.getElementById(PANEL);
+    if (!panel) return;
+    panel.querySelector('#yst2-auto-follow-chooser')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'yst2-auto-follow-chooser';
+    modal.className = 'yst2-modal-backdrop';
+    modal.innerHTML = '<section class="yst2-modal" role="dialog" aria-modal="true" aria-labelledby="yst2-auto-follow-title">'
+      + '<header class="yst2-modal-head"><div><h3 id="yst2-auto-follow-title">Choose the series playlist</h3>'
+      + '<p class="yst2-muted">These playlists were checked to ensure they contain the current video.</p></div>'
+      + '<button type="button" id="yst2-auto-follow-close" class="yst2-icon" aria-label="Close">×</button></header>'
+      + '<div class="yst2-candidate-list">' + candidates.map((candidate,index) =>
+        '<button type="button" class="yst2-candidate" data-follow-candidate="' + index + '">'
+          + (candidate.thumb ? '<img loading="lazy" alt="" src="' + esc(candidate.thumb) + '">' : '<span class="yst2-candidate-play">▶</span>')
+          + '<span class="yst2-candidate-copy"><strong>' + esc(candidate.title) + '</strong><small>'
+          + esc(candidate.owner || 'YouTube playlist') + ' · ' + candidate.items.length + ' episodes</small></span><span class="yst2-candidate-arrow">›</span></button>'
+      ).join('') + '</div>'
+      + '<button type="button" id="yst2-auto-follow-manual" class="yst2-subbtn">Add only this video manually</button>'
+      + '<button type="button" id="yst2-auto-follow-cancel" class="yst2-subbtn yst2-dialog-cancel">Cancel</button>'
+      + '</section>';
+    panel.appendChild(modal);
+    modal.querySelectorAll('[data-follow-candidate]').forEach(button => {
+      button.addEventListener('click', () => {
+        const candidate = candidates[Number(button.dataset.followCandidate)];
+        if (candidate && getVideoId() === videoId) finishAutoFollow(candidate, videoId);
+        modal.remove();
+      });
+    });
+    const close = () => modal.remove();
+    modal.querySelector('#yst2-auto-follow-close')?.addEventListener('click', close);
+    modal.querySelector('#yst2-auto-follow-cancel')?.addEventListener('click', close);
+    modal.addEventListener('click', event => { if (event.target === modal) close(); });
+    modal.addEventListener('keydown', event => { if (event.key === 'Escape') close(); });
+    modal.querySelector('#yst2-auto-follow-manual')?.addEventListener('click', () => {
+      modal.remove();
+      showAddVideoDialog();
+    });
+  }
+
+  function showKnownSeriesChooser(videoId, seriesList) {
+    const candidates = seriesList.map(series => ({
+      id: series.id,
+      title: series.title,
+      owner: 'Already in your library',
+      thumb: series.episodes.find(item => item.available !== false && !item.unavailable)?.thumb || '',
+      items: series.episodes,
+      knownSeries: series
+    }));
+    activeTab = 'library';
+    librarySearch = '';
+    openPanel();
+    const panel = document.getElementById(PANEL);
+    if (!panel) return;
+    panel.querySelector('#yst2-auto-follow-chooser')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'yst2-auto-follow-chooser';
+    modal.className = 'yst2-modal-backdrop';
+    modal.innerHTML = '<section class="yst2-modal" role="dialog" aria-modal="true" aria-labelledby="yst2-auto-follow-title">'
+      + '<header class="yst2-modal-head"><div><h3 id="yst2-auto-follow-title">Choose a saved series</h3><p class="yst2-muted">This video appears in more than one saved series.</p></div>'
+      + '<button type="button" id="yst2-auto-follow-close" class="yst2-icon" aria-label="Close">×</button></header>'
+      + '<div class="yst2-candidate-list">' + candidates.map((candidate,index) =>
+        '<button type="button" class="yst2-candidate" data-follow-candidate="' + index + '">'
+          + (candidate.thumb ? '<img loading="lazy" alt="" src="' + esc(candidate.thumb) + '">' : '<span class="yst2-candidate-play">▶</span>')
+          + '<span class="yst2-candidate-copy"><strong>' + esc(candidate.title) + '</strong><small>Saved series · ' + candidate.items.length + ' episodes</small></span><span class="yst2-candidate-arrow">›</span></button>'
+      ).join('') + '</div><button type="button" id="yst2-auto-follow-cancel" class="yst2-subbtn">Cancel</button></section>';
+    panel.appendChild(modal);
+    modal.querySelectorAll('[data-follow-candidate]').forEach(button => button.addEventListener('click', () => {
+      const series = candidates[Number(button.dataset.followCandidate)]?.knownSeries;
+      modal.remove();
+      if (series && getVideoId() === videoId) showSeriesInLibrary(series);
+    }));
+    modal.querySelector('#yst2-auto-follow-close')?.addEventListener('click', () => modal.remove());
+    modal.querySelector('#yst2-auto-follow-cancel')?.addEventListener('click', () => modal.remove());
+    modal.addEventListener('click', event => { if (event.target === modal) modal.remove(); });
+    modal.addEventListener('keydown', event => { if (event.key === 'Escape') modal.remove(); });
+  }
+
+  async function followSeriesFromPlayer() {
+    if (playerActionBusy) return;
+    const videoId = getVideoId();
+    const rawList = getPlaylistId();
+    const listId = isSuggestiblePlaylistId(rawList) ? rawList : '';
+    if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
+      if (listId) {
+        activeTab = 'library';
+        openPanel();
+        await syncCurrentPlaylist();
+      } else {
+        activeTab = 'library';
+        openPanel();
+        toast('Open a YouTube video or playlist first.');
+      }
+      return;
+    }
+    const playerId = document.getElementById('movie_player')?.getVideoData?.().video_id
+      || window.ytInitialPlayerResponse?.videoDetails?.videoId || '';
+    if (playerId && playerId !== videoId) {
+      toast('YouTube is switching videos. Tap Series again when playback settles.');
+      return;
+    }
+    if (listId) {
+      const already = findSeries(listId);
+      if (already && already.episodes.some(episode => episode.id === videoId && episode.available !== false && !episode.unavailable)) {
+        showSeriesInLibrary(already);
+        toast('Already following "' + already.title + '".');
+        return;
+      }
+    } else {
+      const saved = seriesMatchesVideo(videoId);
+      if (saved.length === 1) {
+        showSeriesInLibrary(saved[0]);
+        toast('Opened "' + saved[0].title + '".');
+        return;
+      }
+      if (saved.length > 1) {
+        showKnownSeriesChooser(videoId, saved);
+        return;
+      }
+    }
+    playerActionBusy = true;
+    const capturedVideo = videoId;
+    toast('Finding this series and loading its episodes…');
+    try {
+      if (listId) {
+        try {
+          const catalog = await fetchFullPlaylist(listId);
+          if (getVideoId() === capturedVideo && catalog.items.some(item => item.id === capturedVideo && item.available !== false && !item.unavailable)) {
+            finishAutoFollow({
+              id: listId,
+              title: catalog.title || playlistTitleFromDOM() || seriesSearchTitle(currentVideoDetails(capturedVideo).title) || currentVideoDetails(capturedVideo).title || listId,
+              items: catalog.items,
+              reverse: inferReverseOrder(catalog.items),
+              score: 2000
+            }, capturedVideo);
+            return;
+          }
+        } catch (error) {
+          console.debug('[YouTube Series] direct playlist follow failed:', error && error.message || error);
+        }
+      }
+      const matches = await discoverPlaylistsForVideo(capturedVideo);
+      if (getVideoId() !== capturedVideo) return;
+      if (matches.length === 1) {
+        finishAutoFollow(matches[0], capturedVideo);
+      } else if (matches.length > 1) {
+        const first = matches[0], second = matches[1];
+        if (first.score >= 100 && first.score - second.score >= 50) finishAutoFollow(first, capturedVideo);
+        else showPlaylistCandidateDialog(capturedVideo, matches);
+      } else {
+        activeTab = 'library';
+        librarySearch = '';
+        openPanel();
+        toast('No matching playlist was found. Add this video manually or paste a playlist link.');
+        showAddVideoDialog();
+      }
+    } catch (error) {
+      console.warn('[YouTube Series] smart follow failed', error);
+      if (getVideoId() === capturedVideo) {
+        activeTab = 'library';
+        librarySearch = '';
+        openPanel();
+        toast(error && error.message || 'Could not discover the complete series.');
+        showAddVideoDialog();
+      }
+    } finally {
+      playerActionBusy = false;
+    }
+  }
+
+  function openFromPlayer() {
+    followSeriesFromPlayer();
+  }
   function ensureUI() {
     addStyles();
     if(!document.getElementById(PANEL)){const p=document.createElement('aside');p.id=PANEL;document.body.appendChild(p);}
@@ -709,7 +1785,7 @@
       .yst2-continue span{font-weight:400;color:#ffc0cb}.yst2-done{color:#65d6a1;padding:9px 0}.yst2-details{margin-top:9px}.yst2-details summary{cursor:pointer;color:#ddd;padding:5px 0;font-size:12px}.yst2-details summary span{color:#999;margin-left:5px}
       .yst2-ep{display:flex;align-items:center;gap:9px;padding:9px 0;border-bottom:1px solid #292a30}.yst2-thumb{width:86px;aspect-ratio:16/9;object-fit:cover;border-radius:6px;background:#292a30}.yst2-epbody{flex:1;min-width:0}
       .yst2-epname{display:block;background:none;border:0;color:#eee;text-align:left;padding:0;font-weight:650;font-size:12px;line-height:1.4;max-height:2.8em;overflow:hidden}.yst2-epbody .yst2-muted{margin-top:4px}.yst2-epbody .yst2-bar{margin-top:5px}
-      .yst2-mark{background:none;border:0;color:#aaa;font-size:19px;min-width:28px}.yst2-mark.checked{color:#62d5a0}.yst2-ep.is-watched .yst2-epname{color:#b5b5bc}
+      .yst2-mark{background:none;border:0;color:#aaa;font-size:19px;min-width:28px}.yst2-mark.checked{color:#62d5a0}.yst2-through,.yst2-start-here{border:0;background:transparent;color:#aab0bf;padding:5px 7px;cursor:pointer}.yst2-through:hover,.yst2-start-here:hover{color:#ff8da3}.yst2-through:focus-visible,.yst2-start-here:focus-visible{outline:2px solid #ff6682;outline-offset:2px}.yst2-ep.is-watched .yst2-epname{color:#b5b5bc}
       .yst2-empty{text-align:center;padding:42px 16px;color:#ddd}.yst2-empty h3{margin:10px 0 5px}.yst2-empty p{color:#a5a6b0;font-size:12px}.yst2-empty .symbol{font-size:38px;color:#ff1744}
       .yst2-setting{display:flex;align-items:center;gap:8px;margin:13px 0;font-size:12px}.yst2-setting select{margin-left:auto;background:#292a31;color:#eee;border:1px solid #444;border-radius:6px;padding:5px}
       .yst2-setting input{accent-color:#ff1744}.dangerbtn{color:#ff8b9b}.yst2-footer{padding:10px 15px;border-top:1px solid #292a30;color:#8d8f99;font-size:10px}
@@ -790,6 +1866,20 @@
       #${PANEL} [hidden]{display:none!important}
       @media(max-width:600px){.yst2-dashboard{padding:10px 10px 8px;gap:6px}.yst2-metric{padding:9px}.yst2-toolbar{padding:10px;align-items:stretch}.yst2-primary-actions{flex:1}.yst2-primary-actions button{flex:1;padding:9px 7px}.yst2-data-actions{align-items:stretch}.yst2-tabs{padding:0 10px 9px}.yst2-tabs button{padding:8px 4px;gap:4px}.yst2-content{padding:10px}.yst2-series{padding:10px}.yst2-series-art{width:83px;min-width:83px;aspect-ratio:1/1}.yst2-serieshead .yst2-icon{width:24px;height:24px}.yst2-seriestitle{font-size:12px}.yst2-continue{gap:7px;padding:8px}.yst2-continue-copy strong{font-size:10px}.yst2-continue-copy small{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}.yst2-footer{padding:9px 10px}.yst2-searchwrap{margin-left:10px;margin-right:10px}}
       @media(prefers-reduced-motion:reduce){#${PANEL} *,#${PANEL} *:before,#${PANEL} *:after{transition:none!important;scroll-behavior:auto!important}}
+      #yst2-panel .yst2-series-highlight{border-color:#ff5b79;box-shadow:0 0 0 2px #ff315822,0 8px 28px #0006}
+      #yst2-panel .yst2-thumb-empty{display:grid;place-items:center;color:#747988;font-size:18px}
+      #yst2-panel .yst2-ep.is-unavailable{opacity:.72}
+      #yst2-panel .yst2-epname:disabled{cursor:not-allowed;color:#8d92a0}
+      #yst2-panel .yst2-mark:disabled{cursor:not-allowed;opacity:.35}
+      #yst2-panel .yst2-candidate-list{display:flex;flex-direction:column;gap:7px;margin:10px 0 13px}
+      #yst2-panel .yst2-candidate{display:flex;align-items:center;gap:10px;width:100%;padding:9px;border:1px solid #343743;border-radius:10px;background:#22242d;color:#f1f2f6;text-align:left}
+      #yst2-panel .yst2-candidate:hover{background:#2d303b;border-color:#65505a}
+      #yst2-panel .yst2-candidate img{width:84px;aspect-ratio:16/9;object-fit:cover;border-radius:7px;flex:none}
+      #yst2-panel .yst2-candidate-play{width:84px;height:47px;display:grid;place-items:center;background:#34202a;border-radius:7px;color:#ff8ba0;flex:none}
+      #yst2-panel .yst2-candidate-copy{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1}
+      #yst2-panel .yst2-candidate-copy strong{font-size:12px;line-height:1.4;overflow-wrap:anywhere}
+      #yst2-panel .yst2-candidate-copy small{font-size:10px;color:#a0a5b2}
+      #yst2-panel .yst2-candidate-arrow{font-size:22px;color:#a6abba}
     `;document.head.appendChild(st);
   }
   function trackCurrentVideo() {
@@ -804,36 +1894,44 @@
     // Detach the previous episode's closures before attaching handlers for the new episode.
     if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;}
     currentVideoId=meta.id;activeVideo=video;
-    const list=getPlaylistId(), s=list?findSeries(list):db.series.find(x=>x.episodes.some(e=>e.id===meta.id));
-    if(s&&!s.episodes.some(e=>e.id===meta.id)){
-      s.episodes.push({id:meta.id,title:meta.title,duration:meta.duration,thumb:meta.thumb,url:meta.url,order:s.episodes.length});saveDB();
+    const list=getPlaylistId();
+    const listSeries=list?findSeries(list):undefined;
+    const listOrder=listSeries && listSeries.playlistId===list?currentPlaylistIndex():-1;
+    const listedOccurrence=listSeries?episodeOccurrence(listSeries,meta.id,listOrder):null;
+    const s=listedOccurrence?listSeries:db.series.find(x=>episodeOccurrence(x,meta.id,x.playlistId===list?listOrder:-1));
+    const currentOccurrence=s?episodeOccurrence(s,meta.id,s.playlistId===list?listOrder:-1):null;
+    if(s&&currentOccurrence){
+      s.cursorVideoId=meta.id;
+      s.cursorOrder=currentOccurrence.order;
+      s.cursorUpdatedAt=Date.now();
     }
     const savePosition=()=>{
       if(!Number.isFinite(video.currentTime))return;
       const dur=Number.isFinite(video.duration)?video.duration:meta.duration;
       const old=stateFor(meta.id), threshold=Number(db.settings.watchedThreshold);
-      const watched=old.watched || (dur>0 && (video.ended || (threshold<1 && video.currentTime/dur>=threshold)));
+      const watched=old.completionOverride === 'WATCHED' || (old.completionOverride !== 'UNWATCHED' && (old.watched || shouldAutoComplete(video.currentTime,dur,threshold,Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS),video.ended)));
       setState(meta.id,{title:meta.title||old.title,position:watched?(dur||video.currentTime):video.currentTime,duration:dur||old.duration,watched},false);
       if(s) db.history[meta.id]={title:meta.title,lastSeen:Date.now()};
       saveDB();
-      if(document.getElementById(PANEL)?.classList.contains('open')&&Date.now()-lastSave>1500){lastSave=Date.now();renderPanel();}
+      if(document.getElementById(PANEL)?.classList.contains('open')&&Date.now()-lastPanelRender>1800){lastPanelRender=Date.now();renderPanel();}
     };
     const onTime=()=>{if(Date.now()-lastSave>=SAVE_MS){lastSave=Date.now();savePosition();}};
     video.addEventListener('timeupdate',onTime);
     video.addEventListener('loadedmetadata',savePosition,{once:true});
     video.addEventListener('pause',savePosition);
     const onEnded=()=>{
-      setState(meta.id,{title:meta.title,position:video.duration||meta.duration,duration:video.duration||meta.duration,watched:true},false);
+      const previous = stateFor(meta.id);
+      setState(meta.id,{title:meta.title,position:video.duration||meta.duration,duration:video.duration||meta.duration,watched:previous.completionOverride !== 'UNWATCHED'},false);
       if(s) db.history[meta.id]={title:meta.title,lastSeen:Date.now()};
       saveDB();
-      if(db.settings.autoNext && s) {
-        const next=chooseNext(s,meta.id);
+      if(db.settings.autoNext && s && isWatched(meta.id)) {
+        const next=chooseNext(s,meta.id,currentOccurrence&&currentOccurrence.order);
         if(next && next.id!==meta.id) {
           toast(`Playing next episode: ${next.title}`);
           setTimeout(()=>{if(video.ended&&getVideoId()===meta.id)openEpisode(s,next,false);},900);
         }
       }
-      if(document.getElementById(PANEL)?.classList.contains('open'))renderPanel();
+      if(document.getElementById(PANEL)?.classList.contains('open')){lastPanelRender=Date.now();renderPanel();}
     };
     video.addEventListener('ended',onEnded);
     activeVideoCleanup=()=>{

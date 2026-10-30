@@ -57,7 +57,7 @@ test('sidebar button relocates when YouTube navigation loads after the userscrip
 });
 
 test('one-by-one series builder actions are wired and versioned', () => {
-  assert.match(source, /^\/\/ @version\s+2\.3\.0$/m);
+  assert.match(source, /^\/\/ @version\s+2\.5\.1$/m);
   assert.match(source, /id="yst2-add-current"/);
   assert.match(source, /function showAddVideoDialog\(\)/);
   assert.match(source, /function saveVideoToSeries\(series, meta\)/);
@@ -74,11 +74,13 @@ test('blank series names receive a unique default name', () => {
   assert.ok(source.includes("while (names.has(('New Series ' + suffix).toLocaleLowerCase())) suffix++;"));
 });
 
-test('player button prioritizes adding the current video and keeps a playlist-sync option', () => {
+test('player button starts automatic series following and preserves a manual fallback', () => {
   const fromPlayer = source.slice(source.indexOf('function openFromPlayer()'), source.indexOf('function ensureUI()'));
-  assert.ok(fromPlayer.indexOf('if (videoId)') < fromPlayer.indexOf('if (listId)'));
+  assert.match(fromPlayer, /followSeriesFromPlayer\(\)/);
+  assert.match(source, /async function followSeriesFromPlayer\(\)/);
+  assert.match(source, /async function discoverPlaylistsForVideo\(videoId\)/);
   assert.match(source, /id="yst2-dialog-sync-playlist"/);
-  assert.match(source, /Sync the entire current playlist instead/);
+  assert.match(source, /No matching playlist was found/);
 });
 
 test('manual series does not require a playlist ID', () => {
@@ -109,31 +111,37 @@ test('readme describes beta status and local storage limitations', () => {
 });
 
 test('auto-next never repeats an already-watched episode when no unwatched episode follows', () => {
-  const watched = new Set(['current', 'later-watched', 'last-watched']);
+  const watched = new Set(['aaaaaaaaaaa', 'bbbbbbbbbbb', 'ccccccccccc']);
+  const orderedEpisodes = vm.runInNewContext(`(${extractSimpleFunction(source, 'orderedEpisodes')})`);
   const chooseNext = vm.runInNewContext(`(${extractSimpleFunction(source, 'chooseNext')})`, {
     stateFor: id => ({ watched: watched.has(id) }),
-    chooseContinue: () => ({ id: 'continue-fallback' })
+    isWatched: id => watched.has(id),
+    chooseContinue: () => ({ id: 'ddddddddddd' }),
+    orderedEpisodes
   });
   const series = { episodes: [
-    { id: 'current', order: 0 },
-    { id: 'later-watched', order: 1 },
-    { id: 'last-watched', order: 2 }
+    { id: 'aaaaaaaaaaa', order: 0 },
+    { id: 'bbbbbbbbbbb', order: 1 },
+    { id: 'ccccccccccc', order: 2 }
   ] };
-  assert.equal(chooseNext(series, 'current'), null);
+  assert.equal(chooseNext(series, 'aaaaaaaaaaa'), null);
 });
 
 test('auto-next selects the next unwatched episode in playlist order', () => {
-  const watched = new Set(['current', 'watched-middle']);
+  const watched = new Set(['aaaaaaaaaaa', 'bbbbbbbbbbb']);
+  const orderedEpisodes = vm.runInNewContext(`(${extractSimpleFunction(source, 'orderedEpisodes')})`);
   const chooseNext = vm.runInNewContext(`(${extractSimpleFunction(source, 'chooseNext')})`, {
     stateFor: id => ({ watched: watched.has(id) }),
-    chooseContinue: () => null
+    isWatched: id => watched.has(id),
+    chooseContinue: () => null,
+    orderedEpisodes
   });
   const series = { episodes: [
-    { id: 'current', order: 0 },
-    { id: 'watched-middle', order: 1 },
-    { id: 'next-unwatched', order: 2 }
+    { id: 'aaaaaaaaaaa', order: 0 },
+    { id: 'bbbbbbbbbbb', order: 1 },
+    { id: 'ccccccccccc', order: 2 }
   ] };
-  assert.equal(chooseNext(series, 'current').id, 'next-unwatched');
+  assert.equal(chooseNext(series, 'aaaaaaaaaaa').id, 'ccccccccccc');
 });
 
 test('playlist refresh and history scan can batch state changes into one write', () => {
@@ -160,7 +168,339 @@ test('library UI includes search, progress overview, artwork, accessible tabs, a
   assert.match(source, /id="yst2-dashboard"/);
   assert.match(source, /class="yst2-series-art"/);
   assert.match(source, /aria-selected=/);
-  assert.ok(source.includes('data-sync="${esc(s.id)}"'));
+  assert.match(source, /data-sync="' \+ esc\(s\.id\)/);
   assert.match(source, /const applySearch = \(\)/);
   assert.match(source, /prefers-reduced-motion:reduce/);
+});
+
+test('playlist fetch is scoped to the requested list and follows bounded continuation pages', () => {
+  assert.match(source, /browseId: 'VL' \+ listId/);
+  assert.match(source, /function parsePlaylistPage\(data, listId, continuation, offset\)/);
+  assert.match(source, /playlistPanelFor\(data, listId\)/);
+  assert.match(source, /maxRequests: 100/);
+  assert.match(source, /no partial catalog was saved/i);
+  const fetcher = source.slice(source.indexOf('async function fetchFullPlaylist'), source.indexOf('function playlistTitleFromDOM'));
+  assert.doesNotMatch(fetcher, /findPlaylistRenderer\(data\)/);
+  assert.doesNotMatch(fetcher, /domPlaylistItems\(\)/);
+});
+
+test('special radio mixes, Watch Later and Library lists are excluded from automatic following', () => {
+  const isSuggestible = vm.runInNewContext('(' + extractSimpleFunction(source, 'isSuggestiblePlaylistId') + ')');
+  assert.equal(isSuggestible('PLabcdefghijk'), true);
+  assert.equal(isSuggestible('RDMMabcdefghij'), false);
+  assert.equal(isSuggestible('WL'), false);
+  assert.equal(isSuggestible('LL'), false);
+  assert.equal(isSuggestible('not a playlist'), false);
+});
+
+test('series naming removes episode suffixes and preserves season identity', () => {
+  const deriveName = vm.runInNewContext('(' + extractSimpleFunction(source, 'seriesSearchTitle') + ')');
+  assert.equal(deriveName('Skybound Episode 12 | English Dub'), 'Skybound');
+  assert.equal(deriveName('Blue Station Season 2 Episode 3'), 'Blue Station Season 2');
+});
+
+test('episode order inference reverses newest-first numbered catalogs only when evidence is strong', () => {
+  const number = vm.runInNewContext('(' + extractSimpleFunction(source, 'episodeNumberFromTitle') + ')');
+  const infer = vm.runInNewContext('(' + extractSimpleFunction(source, 'inferReverseOrder') + ')', {
+    episodeNumberFromTitle: number
+  });
+  assert.equal(infer([
+    {id:'aaaaaaaaaaa',title:'Episode 12',available:true},
+    {id:'bbbbbbbbbbb',title:'Episode 11',available:true},
+    {id:'ccccccccccc',title:'Episode 10',available:true}
+  ]), true);
+  assert.equal(infer([
+    {id:'aaaaaaaaaaa',title:'Episode 1',available:true},
+    {id:'bbbbbbbbbbb',title:'Episode 2',available:true},
+    {id:'ccccccccccc',title:'Episode 3',available:true}
+  ]), false);
+  assert.equal(infer([
+    {id:'aaaaaaaaaaa',title:'Episode 1',available:true},
+    {id:'bbbbbbbbbbb',title:'Special',available:true},
+    {id:'ccccccccccc',title:'Episode 3',available:true}
+  ]), false);
+});
+
+test('visual episode order leaves original YouTube playlist indexes intact', () => {
+  const ordered = vm.runInNewContext('(' + extractSimpleFunction(source, 'orderedEpisodes') + ')');
+  const series = {playbackReverse:true,episodes:[
+    {id:'one',order:0},{id:'two',order:1},{id:'three',order:2}
+  ]};
+  assert.deepEqual(Array.from(ordered(series), ep => ep.id), ['three','two','one']);
+  assert.equal(series.episodes[0].order, 0);
+});
+
+test('unavailable playlist slots remain visible but cannot be opened or marked watched', () => {
+  assert.match(source, /__yst_unavailable__/);
+  assert.match(source, /available,\s*unavailable: !available/);
+  assert.match(source, /const unavailable = Boolean\(e\.unavailable \|\| e\.available === false/);
+  assert.match(source, /if \(!s \|\| !e \|\| e\.unavailable \|\| e\.available === false/);
+  assert.match(source, /if \(!\/\^\[A-Za-z0-9_-\]\{11\}\$\/\.test\(id\)\) return/);
+});
+
+test('playlist discovery verifies that each candidate catalog contains the currently playing video', () => {
+  const discovery = source.slice(source.indexOf('async function discoverPlaylistsForVideo'), source.indexOf('function showSeriesInLibrary'));
+  assert.match(discovery, /catalog\.items\.some\(item => item\.id === videoId/);
+  assert.match(discovery, /fetchFullPlaylist\(candidate\.id/);
+  assert.match(source, /catalog\.items\.some\(item => item\.id === capturedVideo/);
+  assert.match(source, /Choose the series playlist/);
+});
+
+test('playback tracker never silently appends a video absent from the followed catalog', () => {
+  const track = source.slice(source.indexOf('function trackCurrentVideo()'), source.indexOf('function routeChanged()'));
+  assert.match(track, /const listedOccurrence=listSeries\?episodeOccurrence\(listSeries,meta\.id,listOrder\):null/);
+  assert.match(track, /s\.cursorVideoId=meta\.id/);
+  assert.doesNotMatch(track, /s\.episodes\.push\(\{id:meta\.id/);
+});
+
+
+test('wrapped playlist-panel rows retain the original YouTube episode index', () => {
+  const rendererText = vm.runInNewContext('(' + extractSimpleFunction(source, 'rendererText') + ')');
+  const rowEpisode = vm.runInNewContext('(' + extractSimpleFunction(source, 'playlistRowEpisode') + ')', {
+    rendererText,
+    parseDuration: () => 0
+  });
+  const parseRows = vm.runInNewContext('(' + extractSimpleFunction(source, 'parsePlaylistRows') + ')', {
+    rendererText,
+    playlistRowEpisode: rowEpisode,
+    playlistContinuation: () => ''
+  });
+  const row = {
+    playlistPanelVideoWrapperRenderer: {
+      primaryRenderer: {
+        playlistPanelVideoRenderer: {
+          videoId: 'aaaaaaaaaaa',
+          title: { simpleText: 'Episode 7' },
+          index: { simpleText: '7' }
+        }
+      }
+    }
+  };
+  const parsed = parseRows([row], 'PLabcdefghijk', 0, {});
+  assert.equal(parsed.items.length, 1);
+  assert.equal(parsed.items[0].id, 'aaaaaaaaaaa');
+  assert.equal(parsed.items[0].order, 6);
+  assert.equal(parsed.items[0].available, true);
+});
+
+
+test('episode-order inference falls back to relative upload ages when episode numbers are absent', () => {
+  const number = vm.runInNewContext('(' + extractSimpleFunction(source, 'episodeNumberFromTitle') + ')');
+  const age = vm.runInNewContext('(' + extractSimpleFunction(source, 'episodeAgeRange') + ')');
+  const infer = vm.runInNewContext('(' + extractSimpleFunction(source, 'inferReverseOrder') + ')', {
+    episodeNumberFromTitle: number,
+    episodeAgeRange: age
+  });
+  const newestFirst = [
+    {id:'aaaaaaaaaaa',title:'Opening',videoInfo:'3 days ago • 10K views',available:true},
+    {id:'bbbbbbbbbbb',title:'Chapter continues',videoInfo:'2 weeks ago • 8K views',available:true},
+    {id:'ccccccccccc',title:'Final chapter',videoInfo:'3 months ago • 2K views',available:true}
+  ];
+  const oldestFirst = [...newestFirst].reverse();
+  assert.equal(infer(newestFirst), true);
+  assert.equal(infer(oldestFirst), false);
+});
+
+test('localized episode numbers are recognized without guessing ambiguous compilations', () => {
+  const number = vm.runInNewContext('(' + extractSimpleFunction(source, 'episodeNumberFromTitle') + ')');
+  assert.equal(number('Épisode 7 — Saison 2'), 20007);
+  assert.equal(number('Episode 1 to Episode 12 Compilation'), null);
+});
+
+
+test('resume planner starts from the selected cursor before falling back to the first unwatched episode', () => {
+  const orderedEpisodes = vm.runInNewContext('(' + extractSimpleFunction(source, 'orderedEpisodes') + ')');
+  const chooseContinue = vm.runInNewContext('(' + extractSimpleFunction(source, 'chooseContinue') + ')', {
+    orderedEpisodes,
+    stateFor: id => ({ watched: id === 'aaaaaaaaaaa' }),
+    isWatched: id => id === 'aaaaaaaaaaa'
+  });
+  const series = {
+    cursorVideoId: 'bbbbbbbbbbb',
+    cursorOrder: 1,
+    episodes: [
+      {id:'aaaaaaaaaaa',order:0},
+      {id:'bbbbbbbbbbb',order:1},
+      {id:'ccccccccccc',order:2}
+    ]
+  };
+  assert.equal(chooseContinue(series).id, 'bbbbbbbbbbb');
+  series.cursorVideoId = 'aaaaaaaaaaa';
+  series.cursorOrder = 0;
+  assert.equal(chooseContinue(series).id, 'bbbbbbbbbbb');
+});
+
+test('YouTube channel playlist-tab lookup verifies channel identity before enumerating its playlists', () => {
+  const channelBrowseTabs = vm.runInNewContext('(' + extractSimpleFunction(source, 'channelBrowseTabs') + ')');
+  const getEndpoint = vm.runInNewContext('(' + extractSimpleFunction(source, 'channelPlaylistEndpoint') + ')', {channelBrowseTabs});
+  const channel = 'UCabcdefghijklmnopqrstuv';
+  const valid = {
+    metadata: {channelMetadataRenderer:{externalId:channel}},
+    contents: {twoColumnBrowseResultsRenderer:{tabs:[
+      {tabRenderer:{title:'Home',endpoint:{browseEndpoint:{browseId:channel}}}},
+      {tabRenderer:{title:'Playlists',endpoint:{browseEndpoint:{browseId:channel,params:'PL_PARAMS'}}}}
+    ]}}
+  };
+  assert.equal(getEndpoint(valid, channel), 'PL_PARAMS');
+  assert.equal(getEndpoint(valid, 'UCxxxxxxxxxxxxxxxxxxxxxx'), '');
+});
+
+test('playlist discovery also parses YouTube lockup playlist cards', () => {
+  const rendererText = vm.runInNewContext('(' + extractSimpleFunction(source, 'rendererText') + ')');
+  const seriesSearchTitle = vm.runInNewContext('(' + extractSimpleFunction(source, 'seriesSearchTitle') + ')');
+  const normalizeSearchTokens = vm.runInNewContext('(' + extractSimpleFunction(source, 'normalizeSearchTokens') + ')');
+  const isSuggestiblePlaylistId = vm.runInNewContext('(' + extractSimpleFunction(source, 'isSuggestiblePlaylistId') + ')');
+  const isDiscoveryPlaylistId = vm.runInNewContext('(' + extractSimpleFunction(source, 'isDiscoveryPlaylistId') + ')', {isSuggestiblePlaylistId});
+  const parse = vm.runInNewContext('(' + extractSimpleFunction(source, 'parsePlaylistSearchCandidates') + ')', {
+    rendererText, seriesSearchTitle, normalizeSearchTokens, isDiscoveryPlaylistId
+  });
+  const result = parse({
+    contents: {richGridRenderer:{contents:[{richItemRenderer:{content:{lockupViewModel:{
+      contentType:'LOCKUP_CONTENT_TYPE_PLAYLIST',
+      contentId:'PLabcdefghijk',
+      metadata:{lockupMetadataViewModel:{title:{content:'Skybound Season 1'}}},
+      contentImage:{thumbnailViewModel:{image:{sources:[{url:'https://example.invalid/cover.jpg'}]}}}
+    }}}}]}}
+  }, {title:'Skybound Episode 4',channelId:'UCabcdefghijklmnopqrstuv'});
+  assert.equal(result.length, 1);
+  assert.equal(result[0].id, 'PLabcdefghijk');
+  assert.equal(result[0].title, 'Skybound Season 1');
+  assert.ok(result[0].score > 0);
+});
+
+test('current playlist indexes are normalized from YouTube one-based index URLs', () => {
+  const currentPlaylistIndex = vm.runInNewContext('(' + extractSimpleFunction(source, 'currentPlaylistIndex') + ')', {
+    URL,
+    location:{origin:'https://www.youtube.com'}
+  });
+  assert.equal(currentPlaylistIndex('https://www.youtube.com/watch?v=aaaaaaaaaaa&list=PLabcdefghijk&index=4'), 3);
+  assert.equal(currentPlaylistIndex('https://www.youtube.com/watch?v=aaaaaaaaaaa'), -1);
+});
+
+
+test('direct playlist following has a readable series-name fallback when YouTube omits playlist metadata', () => {
+  assert.match(source, /title: catalog\.title \|\| playlistTitleFromDOM\(\) \|\| seriesSearchTitle\(currentVideoDetails\(capturedVideo\)\.title\)/);
+});
+
+test('resume cursor and auto-next match the active YouTube playlist index', () => {
+  assert.match(source, /function currentPlaylistIndex\(url\)/);
+  assert.match(source, /function episodeOccurrence\(series, videoId, requestedOrder\)/);
+  assert.match(source, /const listOrder=listSeries && listSeries\.playlistId===list\?currentPlaylistIndex\(\):-1/);
+  assert.match(source, /chooseNext\(s,meta\.id,currentOccurrence&&currentOccurrence\.order\)/);
+  assert.match(source, /series\.cursorOrder = episode\.order/);
+});
+
+test('discovery inspects the channel Playlists tab before falling back to general YouTube search', () => {
+  const discovery = source.slice(source.indexOf('async function discoverPlaylistsForVideo'), source.indexOf('function showSeriesInLibrary'));
+  const descriptionStage = discovery.indexOf('for (const id of linked)');
+  const channelStage = discovery.indexOf('channelPlaylistCandidates(details, budget)');
+  const searchStage = discovery.indexOf("const seriesTitle = seriesSearchTitle(details.title)");
+  assert.ok(descriptionStage >= 0 && channelStage > descriptionStage && searchStage > channelStage);
+  assert.match(source, /async function channelPlaylistCandidates\(details, budget\)/);
+  assert.match(source, /LOCKUP_CONTENT_TYPE_PLAYLIST/);
+});
+
+
+test('series episode lists are lazy-rendered in bounded batches', () => {
+  const seriesCard = source.slice(source.indexOf('function seriesHTML(s)'), source.indexOf('function renderPanel()'));
+  assert.match(seriesCard, /data-episode-list=/);
+  assert.match(seriesCard, /data-load-more=/);
+  assert.doesNotMatch(seriesCard, /orderedEpisodes\(s\)\.map\(e=>episodeHTML\(s,e\)\)/);
+  assert.match(source, /const EPISODE_BATCH_SIZE = 50/);
+  assert.match(source, /function appendEpisodeBatch\(details, requestedTotal\)/);
+});
+
+test('lazy episode-list state and scroll position survive panel rerenders', () => {
+  assert.match(source, /const episodeUiState = new Map\(\)/);
+  assert.match(source, /loaded: list \? list\.children\.length : 0/);
+  assert.match(source, /scrollTop: list \? list\.scrollTop : 0/);
+  assert.match(source, /appendEpisodeBatch\(details, state\.loaded\)/);
+  assert.match(source, /if\s*\(details\.open\s*&&\s*details\.querySelector/);
+});
+
+test('episode search includes titles even when their rows have not been loaded into the DOM', () => {
+  assert.match(source, /\[series\.title, \.\.\.series\.episodes\.map\(ep => ep\.title \|\| ''\)\]/);
+  assert.match(source, /let haystack = item\.textContent\.toLocaleLowerCase\(\)/);
+});
+
+test('playback progress UI has its own throttle and does not reuse the save throttle', () => {
+  assert.match(source, /let lastPanelRender = 0/);
+  assert.match(source, /Date\.now\(\)-lastPanelRender>1800/);
+  assert.match(source, /lastPanelRender=Date\.now\(\);renderPanel\(\)/);
+});
+
+
+test('Morphe-style completion policy supports percentage and remaining-time completion', () => {
+  const complete = vm.runInNewContext('(' + extractSimpleFunction(source, 'shouldAutoComplete') + ')');
+  assert.equal(complete(920, 1000, 0.92, 30, false), true);
+  assert.equal(complete(850, 1000, 0.92, 30, false), false);
+  assert.equal(complete(970, 1000, 1, 30, false), true);
+  assert.equal(complete(500, 1000, 0.92, 30, true), true);
+  assert.equal(complete(50, 0, 0.92, 30, false), false);
+});
+
+test('manual watched and unwatched overrides take precedence over automatic state', () => {
+  const isWatched = vm.runInNewContext('(' + extractSimpleFunction(source, 'isWatchedState') + ')');
+  assert.equal(isWatched({watched:false, completionOverride:'WATCHED'}), true);
+  assert.equal(isWatched({watched:true, completionOverride:'UNWATCHED'}), false);
+  assert.equal(isWatched({watched:true, completionOverride:'AUTO'}), true);
+  assert.equal(isWatched({watched:false, completionOverride:'AUTO'}), false);
+});
+
+test('manual completion is respected by recording and lazy-rendered episode actions', () => {
+  assert.match(source, /old\.completionOverride !== 'UNWATCHED'/);
+  assert.match(source, /markEpisode\(mark\.dataset\.mark, !isWatched\(mark\.dataset\.mark\)\)/);
+  assert.match(source, /const through = article\.querySelector\('\[data-through\]'\)/);
+});
+
+test('bulk mark-through and undo are implemented for series progress', () => {
+  assert.match(source, /function rememberUndo\(ids, description\)/);
+  assert.match(source, /function undoLastChange\(\)/);
+  assert.match(source, /function markThrough\(series, targetEpisode\)/);
+  assert.match(source, /data-through=/);
+  assert.match(source, /id="yst2-undo"/);
+  assert.match(source, /completionOverride:'WATCHED'/);
+});
+
+test('remaining-time completion is configurable independently from auto-next', () => {
+  assert.match(source, /watchedRemainingSeconds: AUTO_WATCHED_REMAINING_SECONDS/);
+  assert.match(source, /id="yst2-remaining"/);
+  assert.match(source, /id="yst2-autonext"/);
+});
+
+
+test('Morphe library controls support navigation visibility, per-series Hide watched, and Start here', () => {
+  assert.match(source, /id="yst2-sidebar"/);
+  assert.match(source, /function setSeriesStartHere\(series, episode\)/);
+  assert.match(source, /data-start-here=/);
+  assert.match(source, /data-hide-watched=/);
+  assert.match(source, /filter\(episode => !series\.hideWatched \|\| !isWatched\(episode\.id\)\)/);
+  assert.match(source, /const startHere = s && s\.startHereVideoId/);
+});
+
+test('Start here is chosen even when the selected episode is already marked watched', () => {
+  const orderedEpisodes = vm.runInNewContext('(' + extractSimpleFunction(source, 'orderedEpisodes') + ')');
+  const chooseContinue = vm.runInNewContext('(' + extractSimpleFunction(source, 'chooseContinue') + ')', {
+    orderedEpisodes,
+    isWatched: () => true,
+    stateFor: () => ({ watched: true })
+  });
+  const series = {
+    startHereVideoId: 'bbbbbbbbbbb',
+    startHereOrder: 1,
+    episodes: [
+      {id:'aaaaaaaaaaa',order:0},
+      {id:'bbbbbbbbbbb',order:1},
+      {id:'ccccccccccc',order:2}
+    ]
+  };
+  assert.equal(chooseContinue(series).id, 'bbbbbbbbbbb');
+});
+
+
+test('episode controls preserve playlist occurrence identity for duplicate videos', () => {
+  assert.match(source, /data-start-here="[^"]*" data-sid="[^"]*" data-order="[^"]*"/);
+  assert.match(source, /data-through="[^"]*" data-sid="[^"]*" data-order="[^"]*"/);
+  assert.match(source, /item\.id === through\.dataset\.through && item\.order === Number\(through\.dataset\.order\)/);
+  assert.match(source, /item\.id === start\.dataset\.startHere && item\.order === Number\(start\.dataset\.order\)/);
 });

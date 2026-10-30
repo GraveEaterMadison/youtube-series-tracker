@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.5.1
+
+- Add Morphe-style **Hide watched** per-series filtering without removing watched progress from completion statistics.
+- Add **Start here** so Continue watching can begin at a chosen episode, including one previously marked watched.
+- Add a setting to show or hide the Series entry in YouTube navigation while keeping the player button independent.
+- Fix lazy episode action binding so Mark watched through and Start here work independently on every rendered batch.
+
+
+## 2.5.0
+
+- Add Morphe-style completion rules: a configurable watch-percentage threshold, a separate remaining-time threshold (default 30 seconds), and an ended-video completion path.
+- Respect explicit manual watched/unwatched choices during playback progress updates, continue-watching selection, history matching, and auto-next.
+- Add **Mark watched through this episode**, bulk mark-all for playable episodes, and a reversible Undo action.
+- Keep the existing v2 local-storage key and data schema compatible so saved libraries and progress remain in place.
+
+
+## 2.4.0
+
+- Make the player button automatically follow the current playlist and name the series from YouTube playlist metadata.
+- Lazy-render episode rows in 50-item batches, preserve expanded/loaded list state during panel refreshes, and keep episode-title search working before rows are rendered.
+- Use a separate throttle for live progress UI refreshes so saving playback position does not suppress dashboard updates.
+- If the watch URL has no usable playlist ID, discover candidate playlists from the video's description, the video's own channel Playlists tab, and YouTube search; verify each candidate contains the current video and show a chooser when results are ambiguous.
+- Replace page-wide renderer scanning with requested-playlist parsing and bounded, all-or-nothing continuation fetching. Existing saved episodes remain intact if YouTube returns incomplete or unsupported data.
+- Infer likely episode order from numbered titles or relative upload-age metadata, preserve original playlist indexes, and display unavailable rows without allowing them to be played or marked watched.
+- Store a resume cursor so following a series from a mid-season episode opens at that selected episode; keep cursor and auto-next aligned with YouTube's playlist index.
+- Prevent playback from silently adding unrelated videos to a followed playlist and add regression coverage for automatic following and catalog safety.
+
 ## 2.3.0
 
 - Refresh the tracker panel with a compact overview dashboard, clearer primary actions, searchable series/episode/history lists, series cover art, progress indicators, and updated empty states.
