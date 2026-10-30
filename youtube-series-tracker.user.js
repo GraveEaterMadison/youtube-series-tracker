@@ -1093,13 +1093,13 @@
     const thumbnail = e.thumb || (/^[A-Za-z0-9_-]{11}$/.test(e.id) ? 'https://i.ytimg.com/vi/' + e.id + '/hqdefault.jpg' : '');
     return '<article class="yst2-ep ' + (watched ? 'is-watched' : '') + (unavailable ? ' is-unavailable' : '') + '">'
       + (thumbnail ? '<img class="yst2-thumb" loading="lazy" alt="" src="' + esc(thumbnail) + '">' : '<div class="yst2-thumb yst2-thumb-empty" aria-hidden="true">—</div>')
-      + '<div class="yst2-epbody"><button class="yst2-epname" data-play="' + esc(e.id) + '" data-sid="' + esc(s.id) + '"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>'
+      + '<div class="yst2-epbody"><button class="yst2-epname" data-play="' + esc(e.id) + '" data-sid="' + esc(s.id) + '" data-order="' + esc(e.order) + '"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>'
       + esc(e.title || (unavailable ? 'Unavailable video' : st.title || e.id)) + '</button>'
       + '<div class="yst2-muted">' + esc(status) + (!unavailable && (st.duration || e.duration) ? ' · ' + fmt(st.duration || e.duration) : '') + '</div>'
       + '<div class="yst2-bar"><i style="width:' + p + '%"></i></div></div>'
       + '<button class="yst2-mark ' + (watched ? 'checked' : '') + '" data-mark="' + esc(e.id) + '" title="' + (watched ? 'Mark unwatched' : 'Mark watched') + '"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>' + (watched ? '✓' : '○') + '</button>'
-      + '<button class="yst2-through" data-through="' + esc(e.id) + '" data-sid="' + esc(s.id) + '" title="Mark watched through this episode" aria-label="Mark watched through this episode"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>⇢</button>'
-      + '<button class="yst2-start-here" data-start-here="' + esc(e.id) + '" data-sid="' + esc(s.id) + '" title="Continue this series from this episode" aria-label="Continue this series from this episode"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>↳</button>'
+      + '<button class="yst2-through" data-through="' + esc(e.id) + '" data-sid="' + esc(s.id) + '" data-order="' + esc(e.order) + '" title="Mark watched through this episode" aria-label="Mark watched through this episode"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>⇢</button>'
+      + '<button class="yst2-start-here" data-start-here="' + esc(e.id) + '" data-sid="' + esc(s.id) + '" data-order="' + esc(e.order) + '" title="Continue this series from this episode" aria-label="Continue this series from this episode"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>↳</button>'
       + '</article>';
   }
   function saveVideoToSeries(series, meta) {
@@ -1258,14 +1258,14 @@
     through?.addEventListener('click', () => {
       if (through.disabled) return;
       const series = db.series.find(item => item.id === through.dataset.sid);
-      const episode = series?.episodes.find(item => item.id === through.dataset.through && item.order === Number(article.querySelector('[data-play]')?.dataset.order || item.order));
+      const episode = series?.episodes.find(item => item.id === through.dataset.through && item.order === Number(through.dataset.order));
       if (series && episode) markThrough(series, episode);
     });
     const start = article.querySelector('[data-start-here]');
     start?.addEventListener('click', () => {
       if (start.disabled) return;
       const series = db.series.find(item => item.id === start.dataset.sid);
-      const episode = series?.episodes.find(item => item.id === start.dataset.startHere);
+      const episode = series?.episodes.find(item => item.id === start.dataset.startHere && item.order === Number(start.dataset.order));
       if (series && episode) setSeriesStartHere(series, episode);
     });
   }
@@ -1423,7 +1423,8 @@
     p.querySelectorAll('[data-order]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.order);if(!s)return;s.playbackReverse=!s.playbackReverse;saveDB();renderPanel();toast('Episode order: '+(s.playbackReverse?'chronological':'playlist')+'.');}));
     p.querySelectorAll('[data-continue]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.continue);if(s)openEpisode(s,chooseContinue(s));}));
     p.querySelectorAll('[data-mark]').forEach(b=>b.addEventListener('click',()=>{const id=b.dataset.mark;markEpisode(id,!isWatched(id));}));
-    p.querySelectorAll('[data-through]').forEach(b=>b.addEventListener('click',()=>{const series=db.series.find(item=>item.id===b.dataset.sid);const ep=series?.episodes.find(item=>item.id===b.dataset.through);if(series&&ep)markThrough(series,ep);}));
+    p.querySelectorAll('[data-through]').forEach(b=>b.addEventListener('click',()=>{const series=db.series.find(item=>item.id===b.dataset.sid);const ep=series?.episodes.find(item=>item.id===b.dataset.through&&item.order===Number(b.dataset.order));if(series&&ep)markThrough(series,ep);}));
+    p.querySelectorAll('[data-start-here]').forEach(b=>b.addEventListener('click',()=>{const series=db.series.find(item=>item.id===b.dataset.sid);const ep=series?.episodes.find(item=>item.id===b.dataset.startHere&&item.order===Number(b.dataset.order));if(series&&ep)setSeriesStartHere(series,ep);}));
     p.querySelector('#yst2-undo')?.addEventListener('click',undoLastChange);
     p.querySelectorAll('[data-remove]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.remove);if(s&&confirm(`Remove “${s.title}” from the library? Progress will be retained for videos that appear in other series.`)){db.series=db.series.filter(x=>x.id!==s.id);saveDB();renderPanel();}}));
     p.querySelectorAll('[data-sync]').forEach(b=>b.addEventListener('click',async()=>{if(getPlaylistId()!==b.dataset.sync){toast('Open this series playlist first, then refresh it.');return;}await syncCurrentPlaylist();}));
