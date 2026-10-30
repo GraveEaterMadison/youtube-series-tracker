@@ -1242,7 +1242,23 @@
     return true;
   }
   function chooseContinue(s) {
-    return resumePlan(s).episode;
+    const eps = orderedEpisodes(s).filter(e =>
+      e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
+    const startHere = s && s.startHereVideoId
+      ? eps.find(e => e.id === s.startHereVideoId && (!Number.isInteger(s.startHereOrder) || e.order === s.startHereOrder))
+      : null;
+    if (startHere) return startHere;
+    const cursorIndex = s && s.cursorVideoId
+      ? eps.findIndex(e => e.id === s.cursorVideoId && (!Number.isInteger(s.cursorOrder) || e.order === s.cursorOrder))
+      : -1;
+    if (cursorIndex >= 0) {
+      const cursor = eps[cursorIndex];
+      if (!isWatched(cursor.id)) return cursor;
+      const afterCursor = eps.slice(cursorIndex + 1).find(e => !isWatched(e.id));
+      if (afterCursor) return afterCursor;
+    }
+    return eps.find(e => !isWatched(e.id) && stateFor(e.id).position > 5) ||
+      eps.find(e => !isWatched(e.id)) || null;
   }
   function chooseNext(s, id, requestedOrder) {
     const eps = orderedEpisodes(s).filter(e =>
