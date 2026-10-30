@@ -496,3 +496,11 @@ test('Start here is chosen even when the selected episode is already marked watc
   };
   assert.equal(chooseContinue(series).id, 'bbbbbbbbbbb');
 });
+
+
+test('episode controls preserve playlist occurrence identity for duplicate videos', () => {
+  assert.match(source, /data-start-here="[^"]*" data-sid="[^"]*" data-order="[^"]*"/);
+  assert.match(source, /data-through="[^"]*" data-sid="[^"]*" data-order="[^"]*"/);
+  assert.match(source, /item\.id === through\.dataset\.through && item\.order === Number\(through\.dataset\.order\)/);
+  assert.match(source, /item\.id === start\.dataset\.startHere && item\.order === Number\(start\.dataset\.order\)/);
+});
