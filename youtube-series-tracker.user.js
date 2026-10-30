@@ -58,6 +58,7 @@
     return {
       version: VERSION,
       settings: {
+        enabled: true,
         watchedThreshold: AUTO_WATCHED_DEFAULT,
         watchedRemainingSeconds: AUTO_WATCHED_REMAINING_SECONDS,
         autoNext: false,
@@ -65,7 +66,7 @@
         showSidebarButton: true,
         historyScan: true,
         catalogAutoRefresh: true,
-        recordPlaybackProgress: true,
+        recordPlaybackProgress: false,
         importHistoryProgress: false,
         showPlayerButton: true
       },
@@ -1102,7 +1103,7 @@
     }
   }
   async function refreshStaleSeries() {
-    if (!db.settings.catalogAutoRefresh || staleRefreshBusy || syncBusy) return;
+    if (db.settings.enabled === false || !db.settings.catalogAutoRefresh || staleRefreshBusy || syncBusy) return;
     staleRefreshBusy = true;
     try {
       const due = db.series.filter(series => catalogRefreshDue(series)).slice(0, 2);
@@ -1189,6 +1190,10 @@
   function resumePlan(series) {
     const episodes = orderedEpisodes(series).filter(ep =>
       ep.available !== false && !ep.unavailable && /^[A-Za-z0-9_-]{11}$/.test(ep.id));
+    if (!episodes.length && /^[A-Za-z0-9_-]{11}$/.test(String(series.bookmarkVideoId || ''))) {
+      const bookmark = stateFor(series.bookmarkVideoId);
+      return { kind: 'RESUME', episode: { id: series.bookmarkVideoId, title: bookmark.title || 'Saved video', order: -1, duration: bookmark.duration || 0, available: true }, position: isWatched(series.bookmarkVideoId) ? 0 : bookmark.position || 0 };
+    }
     if (!episodes.length) return { kind: 'NO_PLAYABLE', episode: null, position: 0 };
     const startHere = series.startHereVideoId
       ? episodes.find(ep => ep.id === series.startHereVideoId && (!Number.isInteger(series.startHereOrder) || ep.order === series.startHereOrder))
@@ -1245,6 +1250,10 @@
   function chooseContinue(s) {
     const eps = orderedEpisodes(s).filter(e =>
       e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
+    if (!eps.length && /^[A-Za-z0-9_-]{11}$/.test(String(s?.bookmarkVideoId || ''))) {
+      const bookmark = stateFor(s.bookmarkVideoId);
+      return { id: s.bookmarkVideoId, title: bookmark.title || 'Saved video', order: -1, duration: bookmark.duration || 0, available: true };
+    }
     const startHere = s && s.startHereVideoId
       ? eps.find(e => e.id === s.startHereVideoId && (!Number.isInteger(s.startHereOrder) || e.order === s.startHereOrder))
       : null;
@@ -1979,6 +1988,7 @@
     }
   }
   function addPlaylistFollowButton() {
+    if (db.settings.enabled === false) { document.getElementById(PLAYLIST_BTN)?.remove(); return; }
     const listId=getPlaylistId();
     const onPlaylist=location.pathname==='/playlist'||location.pathname.startsWith('/playlist');
     const host=document.querySelector('ytd-playlist-header-renderer #top-level-buttons-computed')
@@ -2012,6 +2022,7 @@
   }
 
   function addPlayerButton() {
+    if (db.settings.enabled === false) { document.getElementById(PLAYER_BTN)?.remove(); document.getElementById(PLAYER_PREV_BTN)?.remove(); document.getElementById(PLAYER_NEXT_BTN)?.remove(); return; }
     const player = document.querySelector('#movie_player');
     if (!player) return;
     const host = player.querySelector('.ytp-chrome-top-buttons')
@@ -2077,7 +2088,21 @@
     const requestedOrder = series && series.playlistId && getPlaylistId() === series.playlistId
       ? currentPlaylistIndex() : -1;
     const episode = episodeOccurrence(series, videoId, requestedOrder);
-    if (!episode) return;
+    if (!episode) {
+      if (series?.bookmarkVideoId === videoId) {
+        const video = document.querySelector('video'), old = stateFor(videoId);
+        const duration = Number.isFinite(video?.duration) && video.duration > 0 ? video.duration : old.duration || 0;
+        const position = Number.isFinite(video?.currentTime) && video.currentTime > 0 ? video.currentTime : old.position || 0;
+        if (db.settings.recordPlaybackProgress !== false) {
+          const watched = old.completionOverride === 'WATCHED' || (old.completionOverride !== 'UNWATCHED' && (old.watched || shouldAutoComplete(position,duration,Number(db.settings.watchedThreshold),Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS),Boolean(video?.ended))));
+          setState(videoId,{title:old.title || videoTitle(),position:watched?(duration||position):position,duration:duration||old.duration,watched},false);
+          db.history[videoId]={title:old.title || videoTitle(),lastSeen:Date.now()};
+        }
+        series.cursorVideoId=videoId;series.cursorOrder=-1;series.cursorUpdatedAt=Date.now();
+        return;
+      }
+      return;
+    }
     const video = document.querySelector('video');
     const old = stateFor(videoId);
     const duration = Number.isFinite(video && video.duration) && video.duration > 0 ? video.duration : episode.duration || old.duration || 0;
@@ -2252,6 +2277,7 @@
   }
 
   async function followSeriesFromPlayer() {
+    if (db.settings.enabled === false) { activeTab='settings'; openPanel(); toast('Enable Series Tracker in Settings first.'); return; }
     if (playerActionBusy) return;
     const videoId = getVideoId();
     const rawList = getPlaylistId();
@@ -2353,7 +2379,7 @@
     addPlayerButton();
     addPlaylistFollowButton();
   }
-  function openPanel(){document.getElementById(PANEL)?.classList.add('open');renderPanel();}
+  function openPanel(){if(db.settings.enabled===false)activeTab='settings';document.getElementById(PANEL)?.classList.add('open');renderPanel();}
   function closePanel(){document.getElementById(PANEL)?.classList.remove('open');}
   function togglePanel(){document.getElementById(PANEL)?.classList.contains('open')?closePanel():openPanel();}
   function toast(message) {
@@ -2475,6 +2501,7 @@
     `;document.head.appendChild(st);
   }
   function trackCurrentVideo() {
+    if (db.settings.enabled === false) { if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;} currentVideoId='';activeVideo=null;activePlaybackSession=null;return; }
     const meta=videoMeta(), video=document.querySelector('video');
     if(!meta||!video){
       if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;}
@@ -2490,7 +2517,7 @@
     const listSeries=list?findSeries(list):undefined;
     const listOrder=listSeries && listSeries.playlistId===list?currentPlaylistIndex():-1;
     const listedOccurrence=listSeries?episodeOccurrence(listSeries,meta.id,listOrder):null;
-    const s=listedOccurrence?listSeries:db.series.find(x=>episodeOccurrence(x,meta.id,x.playlistId===list?listOrder:-1));
+    const s=listedOccurrence?listSeries:(db.series.find(x=>episodeOccurrence(x,meta.id,x.playlistId===list?listOrder:-1)) || db.series.find(x=>x.bookmarkVideoId===meta.id));
     const currentOccurrence=s?episodeOccurrence(s,meta.id,s.playlistId===list?listOrder:-1):null;
     if(s&&currentOccurrence){
       activePlaybackSession={seriesId:s.id,videoId:meta.id,order:currentOccurrence.order,catalogRevision:Number(s.catalogRevision)||0};
