@@ -57,7 +57,7 @@ test('sidebar button relocates when YouTube navigation loads after the userscrip
 });
 
 test('one-by-one series builder actions are wired and versioned', () => {
-  assert.match(source, /^\/\/ @version\s+2\.6\.1$/m);
+  assert.match(source, /^\/\/ @version\s+2\.7\.0$/m);
   assert.match(source, /id="yst2-add-current"/);
   assert.match(source, /function showAddVideoDialog\(\)/);
   assert.match(source, /function saveVideoToSeries\(series, meta\)/);
@@ -635,4 +635,112 @@ test('resume planner follows playback order when a series is reversed', () => {
   const result = planner(series);
   assert.equal(result.kind,'NEXT');
   assert.equal(result.episode.id,'bbbbbbbbbbb');
+});
+
+
+test('playlist URL parser accepts playlist IDs and URLs but excludes special mixes', () => {
+  const suggestible = vm.runInNewContext('(' + extractSimpleFunction(source, 'isSuggestiblePlaylistId') + ')');
+  const parse = vm.runInNewContext('(' + extractSimpleFunction(source, 'parsePlaylistInput') + ')', {
+    URL,
+    isSuggestiblePlaylistId: suggestible
+  });
+  assert.equal(parse('PLabcdefghijk'), 'PLabcdefghijk');
+  assert.equal(parse('https://www.youtube.com/playlist?list=PLabcdefghijk'), 'PLabcdefghijk');
+  assert.equal(parse('https://youtube.com/watch?v=aaaaaaaaaaa&list=PLabcdefghijk'), 'PLabcdefghijk');
+  assert.equal(parse('https://www.youtube.com/watch?v=aaaaaaaaaaa'), '');
+  assert.equal(parse('RDMMabcdefghijk'), '');
+  assert.equal(parse(''), '');
+});
+
+test('Morphe native backup adapter converts milliseconds, ordinals, overrides and bookmarks', () => {
+  const adapt = vm.runInNewContext('(' + extractSimpleFunction(source, 'adaptMorpheBackup') + ')', {
+    MAX_BACKUP_SERIES: 500,
+    MAX_BACKUP_EPISODES: 50000
+  });
+  const native = {
+    format: 'series-tracker',
+    version: 1,
+    series: [{
+      id: 'PLabcdefghijk',
+      name: 'Morphe series',
+      complete: true,
+      reverse: true,
+      hideWatched: true,
+      cursor: 'bbbbbbbbbbb',
+      ordinal: 2,
+      cursorValid: true,
+      bookmark: 'ddddddddddd',
+      startHere: true,
+      fetchedAt: 200,
+      activity: 300,
+      recovery: '',
+      episodes: [
+        { ordinal: 1, id: 'aaaaaaaaaaa', title: 'Episode one', info: '1M views', duration: 60000, available: true },
+        { ordinal: 2, id: 'bbbbbbbbbbb', title: 'Episode two', info: '2M views', duration: 90000, available: true },
+        { ordinal: 3, id: '', title: 'Deleted episode', info: '', duration: 0, available: false }
+      ]
+    }],
+    progress: {
+      aaaaaaaaaaa: { position: 25000, duration: 60000, completed: false, override: 'AUTO', playedAt: 100 },
+      bbbbbbbbbbb: { position: 90000, duration: 90000, completed: false, override: 'UNWATCHED', playedAt: 200 },
+      ddddddddddd: { position: 12000, duration: 40000, completed: false, override: 'AUTO', playedAt: 250 }
+    }
+  };
+  const result = adapt(native);
+  const series = result.series[0];
+  assert.equal(series.title, 'Morphe series');
+  assert.equal(series.playlistId, 'PLabcdefghijk');
+  assert.equal(series.playbackReverse, true);
+  assert.equal(series.hideWatched, true);
+  assert.equal(series.cursorOrder, 1);
+  assert.equal(series.startHereOrder, 1);
+  assert.equal(series.bookmarkVideoId, 'ddddddddddd');
+  assert.equal(series.episodes[0].order, 0);
+  assert.equal(series.episodes[0].duration, 60);
+  assert.equal(series.episodes[2].unavailable, true);
+  assert.equal(result.episodes.aaaaaaaaaaa.position, 25);
+  assert.equal(result.episodes.bbbbbbbbbbb.completionOverride, 'UNWATCHED');
+  assert.equal(result.episodes.ddddddddddd.position, 12);
+});
+
+test('native Morphe export is exposed and uses milliseconds with one-based ordinals', () => {
+  assert.match(source, /function exportMorpheBackup\(\)/);
+  assert.match(source, /format:'series-tracker',version:1/);
+  assert.match(source, /Math\.round\(\(Number\(ep\.duration\)\|\|0\)\*1000\)/);
+  assert.match(source, /ordinal:\(Number\.isInteger\(ep\.order\).*\)\+1/);
+  assert.match(source, /id="yst2-export-morphe"/);
+});
+
+test('backup import merges missing series and does not replace current database state', () => {
+  const importer = source.slice(source.indexOf('function importBackup()'), source.indexOf('function historyProgressPercent'));
+  assert.match(importer, /const missingSeries=restored\.series\.filter\(series=>!existingIds\.has\(series\.id\)\)/);
+  assert.match(importer, /db\.series\.push\(\.\.\.missingSeries\)/);
+  assert.match(importer, /!Object\.prototype\.hasOwnProperty\.call\(db\.episodes,id\)/);
+  assert.match(importer, /Existing series and progress were preserved/);
+  assert.doesNotMatch(importer, /db\s*=\s*restored/);
+});
+
+test('Morphe-style episode menu supports restart, resume, Start here, override reset, and mark-through', () => {
+  assert.match(source, /function showEpisodeMenu\(series, episode\)/);
+  assert.match(source, /Restart from 0:00/);
+  assert.match(source, /Resume at /);
+  assert.match(source, /Use automatic watched status/);
+  assert.match(source, /markEpisode\(episode\.id, 'AUTO'\)/);
+  assert.match(source, /Mark watched through this episode/);
+  assert.match(source, /data-episode-menu=/);
+});
+
+test('master enable switch and Follow-by-link workflow are wired', () => {
+  assert.match(source, /id="yst2-enabled"/);
+  assert.match(source, /id="yst2-follow-playlist"/);
+  assert.match(source, /function showFollowPlaylistDialog\(\)/);
+  assert.match(source, /function showPlaylistFollowWizard\(candidate\)/);
+  assert.match(source, /Mark earlier episodes watched/);
+  assert.match(source, /Enable Series Tracker/);
+});
+
+test('History page gets a non-destructive Series entry point', () => {
+  assert.match(source, /function addHistorySwitcher\(\)/);
+  assert.match(source, /yst2-history-switcher/);
+  assert.match(source, /activeTab='library'; openPanel\(\)/);
 });
