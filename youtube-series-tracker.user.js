@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Series Tracker
 // @namespace    https://github.com/GraveEaterMadison/youtube-series-tracker
-// @version      2.6.0
+// @version      2.6.1
 // @description  Build YouTube series from playlists or add individual videos, with automatic default series names, local progress, watched status, history matching, and optional auto-next.
 // @author       Zero
 // @license      MIT
@@ -1684,14 +1684,181 @@
     p.querySelector('#yst2-markall')?.addEventListener('click',()=>{const s=findSeries(getPlaylistId());if(!s){toast('Open a tracked series playlist first.');return;}const playable=s.episodes.filter(e=>e.available!==false&&!e.unavailable&&/^[A-Za-z0-9_-]{11}$/.test(e.id));if(confirm(`Mark all ${playable.length} playable episodes watched?`)){rememberUndo(playable.map(e=>e.id),'mark all episodes watched');const now=Date.now();for(const e of playable){const old=stateFor(e.id);const already=isWatched(e.id);db.episodes[e.id]={...old,watched:true,completionOverride:'WATCHED',position:old.duration||e.duration||old.position,duration:old.duration||e.duration||0,updatedAt:now,lastWatchedAt:already?old.lastWatchedAt:now};}saveDB();renderPanel();toast('All playable episodes marked watched.');}});
     p.querySelector('#yst2-scanhistory')?.addEventListener('click',scanHistoryPage);
   }
+  function validateBackupDocument(document) {
+    if (!document || typeof document !== 'object' || Array.isArray(document)) throw new Error('Backup must be a JSON object.');
+    const raw = document.data && document.format === 'youtube-series-tracker'
+      ? document.data
+      : document;
+    if (!raw || typeof raw !== 'object' || !Array.isArray(raw.series)
+        || !raw.episodes || typeof raw.episodes !== 'object' || Array.isArray(raw.episodes)) {
+      throw new Error('Backup does not contain a series list and progress map.');
+    }
+    if (raw.series.length > MAX_BACKUP_SERIES) throw new Error('Backup contains too many series.');
+    const progressEntries = Object.entries(raw.episodes);
+    if (progressEntries.length > MAX_BACKUP_EPISODES) throw new Error('Backup contains too many progress records.');
+    const defaults = emptyDB();
+    const settings = { ...defaults.settings };
+    const supplied = raw.settings && typeof raw.settings === 'object' ? raw.settings : {};
+    if (Number.isFinite(Number(supplied.watchedThreshold)) && Number(supplied.watchedThreshold) >= 0.5 && Number(supplied.watchedThreshold) <= 1) settings.watchedThreshold = Number(supplied.watchedThreshold);
+    if (Number.isFinite(Number(supplied.watchedRemainingSeconds)) && Number(supplied.watchedRemainingSeconds) >= 0 && Number(supplied.watchedRemainingSeconds) <= 300) settings.watchedRemainingSeconds = Number(supplied.watchedRemainingSeconds);
+    for (const key of Object.keys(defaults.settings)) if (typeof supplied[key] === 'boolean') settings[key] = supplied[key];
+
+    const seenSeries = new Set();
+    let episodeCount = 0;
+    const series = raw.series.map((row, seriesIndex) => {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error('Invalid series record at index ' + seriesIndex + '.');
+      const id = String(row.id || '');
+      const title = String(row.title || '').trim();
+      if (!/^[A-Za-z0-9_-]{2,200}$/.test(id) || seenSeries.has(id) || !title || title.length > 500) {
+        throw new Error('Invalid or duplicate series identity.');
+      }
+      seenSeries.add(id);
+      if (!Array.isArray(row.episodes) || row.episodes.length > MAX_BACKUP_EPISODES) throw new Error('Invalid episode catalog size.');
+      episodeCount += row.episodes.length;
+      if (episodeCount > MAX_BACKUP_EPISODES) throw new Error('Backup contains too many episode entries.');
+      const occurrences = new Set();
+      const episodes = row.episodes.map((ep,index) => {
+        if (!ep || typeof ep !== 'object' || Array.isArray(ep)) throw new Error('Invalid episode record.');
+        const videoId = String(ep.id || '');
+        const unavailable = Boolean(ep.unavailable || ep.available === false || videoId.startsWith('__yst_unavailable__'));
+        if (!/^[A-Za-z0-9_-]{11}$/.test(videoId) && !(unavailable && /^__yst_unavailable__[A-Za-z0-9_-]{1,180}$/.test(videoId))) {
+          throw new Error('Invalid episode ID in series ' + title + '.');
+        }
+        const order = Number.isInteger(ep.order) && ep.order >= 0 && ep.order <= 1000000 ? ep.order : index;
+        const occurrence = videoId + ':' + order;
+        if (occurrences.has(occurrence)) throw new Error('Duplicate episode occurrence in series ' + title + '.');
+        occurrences.add(occurrence);
+        const duration = Number(ep.duration) || 0;
+        if (!Number.isFinite(duration) || duration < 0 || duration > 604800) throw new Error('Invalid episode duration.');
+        const thumb = String(ep.thumb || '');
+        return {
+          id: videoId,
+          title: String(ep.title || '').slice(0,500),
+          duration,
+          thumb: thumb.startsWith('https://') ? thumb.slice(0,2048) : '',
+          url: unavailable ? '' : 'https://www.youtube.com/watch?v=' + videoId,
+          order,
+          available: !unavailable,
+          unavailable,
+          videoInfo: String(ep.videoInfo || '').slice(0,240),
+          manuallyAdded: Boolean(ep.manuallyAdded)
+        };
+      });
+      const cursorVideoId = /^[A-Za-z0-9_-]{11}$/.test(String(row.cursorVideoId || '')) ? row.cursorVideoId : '';
+      const startHereVideoId = /^[A-Za-z0-9_-]{11}$/.test(String(row.startHereVideoId || '')) ? row.startHereVideoId : '';
+      const newEpisodeIds = Array.isArray(row.newEpisodeIds) ? [...new Set(row.newEpisodeIds.filter(value => /^[A-Za-z0-9_-]{11}$/.test(value)))].slice(0,10000) : [];
+      return {
+        id,
+        playlistId: row.playlistId ? String(row.playlistId).slice(0,200) : null,
+        manual: Boolean(row.manual || !row.playlistId),
+        title,
+        episodes,
+        addedAt: Math.max(0,Number(row.addedAt)||Date.now()),
+        updatedAt: Math.max(0,Number(row.updatedAt)||Date.now()),
+        lastSyncedAt: Math.max(0,Number(row.lastSyncedAt)||0),
+        playbackReverse: Boolean(row.playbackReverse),
+        hideWatched: Boolean(row.hideWatched),
+        cursorVideoId,
+        cursorOrder: Number.isInteger(row.cursorOrder) ? row.cursorOrder : -1,
+        cursorUpdatedAt: Math.max(0,Number(row.cursorUpdatedAt)||0),
+        catalogRevision: Number.isInteger(row.catalogRevision) ? Math.max(0,row.catalogRevision) : (episodes.length ? 1 : 0),
+        cursorRevision: Number.isInteger(row.cursorRevision) ? Math.max(0,row.cursorRevision) : 0,
+        newEpisodeIds,
+        startHereVideoId,
+        startHereOrder: Number.isInteger(row.startHereOrder) ? row.startHereOrder : -1,
+        lastRefreshAttemptAt: Math.max(0,Number(row.lastRefreshAttemptAt)||0),
+        refreshRetryAt: Math.max(0,Number(row.refreshRetryAt)||0),
+        refreshError: String(row.refreshError||'').slice(0,240),
+        recoveryRequired: Boolean(row.recoveryRequired),
+        recoveryVideoId: /^[A-Za-z0-9_-]{11}$/.test(String(row.recoveryVideoId||'')) ? row.recoveryVideoId : ''
+      };
+    });
+
+    const episodes = {};
+    for (const [id,state] of progressEntries) {
+      if (!/^[A-Za-z0-9_-]{11}$/.test(id) || !state || typeof state !== 'object' || Array.isArray(state)) continue;
+      const duration = Number(state.duration) || 0;
+      const position = Number(state.position) || 0;
+      if (!Number.isFinite(duration) || !Number.isFinite(position) || duration < 0 || duration > 604800 || position < 0 || position > 604800) continue;
+      const completionOverride = ['AUTO','WATCHED','UNWATCHED'].includes(state.completionOverride) ? state.completionOverride : 'AUTO';
+      episodes[id] = {
+        watched: Boolean(state.watched),
+        completionOverride,
+        position: Math.min(position,duration || position),
+        duration,
+        title: String(state.title||'').slice(0,500),
+        updatedAt: Math.max(0,Number(state.updatedAt)||0),
+        lastWatchedAt: Math.max(0,Number(state.lastWatchedAt)||0)
+      };
+    }
+    const history = {};
+    if (raw.history && typeof raw.history === 'object' && !Array.isArray(raw.history)) {
+      for (const [id,item] of Object.entries(raw.history).slice(0,MAX_BACKUP_EPISODES)) {
+        if (/^[A-Za-z0-9_-]{11}$/.test(id) && item && typeof item === 'object' && !Array.isArray(item)) {
+          history[id] = {
+            title: String(item.title||'').slice(0,500),
+            lastSeen: Math.max(0,Number(item.lastSeen)||0),
+            percent: Number.isFinite(Number(item.percent)) ? Math.max(0,Math.min(100,Number(item.percent))) : null
+          };
+        }
+      }
+    }
+    return { ...defaults, version: VERSION, settings, series, episodes, history, lastSync: Math.max(0,Number(raw.lastSync)||0) };
+  }
   function exportBackup() {
-    const blob = new Blob([JSON.stringify(db,null,2)],{type:'application/json'});
+    const document = { format: 'youtube-series-tracker', formatVersion: 1, exportedAt: new Date().toISOString(), data: db };
+    const blob = new Blob([JSON.stringify(document,null,2)],{type:'application/json'});
     const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download='youtube-series-backup.json';a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);
   }
   function importBackup() {
     const input=document.createElement('input');input.type='file';input.accept='.json,application/json';
-    input.onchange=async()=>{try{const p=JSON.parse(await input.files[0].text());if(!Array.isArray(p.series)||!p.episodes||typeof p.episodes!=='object')throw new Error('invalid');if(!confirm('Replace current tracker data with this backup?'))return;const base=emptyDB();db={...base,...p,settings:{...base.settings,...(p.settings||{})}};saveDB();renderPanel();toast('Backup imported.');}catch(_){toast('Invalid backup file.');}};
+    input.onchange=async()=>{
+      try {
+        if (!input.files || !input.files[0]) return;
+        if (input.files[0].size > MAX_BACKUP_CHARS) throw new Error('Backup exceeds the 8 MB size limit.');
+        const parsed = JSON.parse(await input.files[0].text());
+        const restored = validateBackupDocument(parsed);
+        const existingIds = new Set(db.series.map(series => series.id));
+        const overlap = restored.series.filter(series => existingIds.has(series.id)).length;
+        const episodeCount = restored.series.reduce((count,series) => count + series.episodes.length,0);
+        const progressCount = Object.keys(restored.episodes).length;
+        const preview = 'Backup preview\n'
+          + restored.series.length + ' series\n'
+          + episodeCount + ' episode entries\n'
+          + progressCount + ' progress records\n'
+          + overlap + ' series will replace existing entries.\n\n'
+          + 'Restore this backup? Current data will be replaced.';
+        if (!confirm(preview)) return;
+        rememberDatabaseUndo('restore backup');
+        db = restored;
+        saveDB();
+        renderPanel();
+        toast('Backup restored and validated. Undo is available for 8 seconds.');
+      } catch(error) {
+        console.warn('[YouTube Series] Backup import rejected:', error?.message || error);
+        toast('Could not import backup: ' + (error?.message || 'invalid file'));
+      }
+    };
     input.click();
+  }
+  function historyProgressPercent(node) {
+    if (!node) return null;
+    const selectors = [
+      'ytd-thumbnail-overlay-resume-playback-renderer #progress',
+      'ytd-thumbnail-overlay-resume-playback-renderer [style*="width"]',
+      '[aria-label*="watched"] [style*="width"]',
+      'yt-progress-bar[aria-valuenow]',
+      '[role="progressbar"][aria-valuenow]'
+    ];
+    for (const selector of selectors) {
+      const bar = node.querySelector(selector);
+      if (!bar) continue;
+      const aria = Number(bar.getAttribute('aria-valuenow'));
+      if (Number.isFinite(aria) && aria >= 0 && aria <= 100) return aria;
+      const width = /([0-9]+(?:\.[0-9]+)?)%/.exec(bar.getAttribute('style') || '');
+      if (width) return Math.max(0,Math.min(100,Number(width[1])));
+    }
+    return null;
   }
   function scanHistoryPage() {
     if (!location.pathname.startsWith('/feed/history')) { toast('Open youtube.com/feed/history first, then select Scan History.'); return; }
@@ -1702,8 +1869,21 @@
       try {
         const id=new URL(a.href,location.origin).searchParams.get('v');if(!id||!matched.has(id))continue;
         const title=text(node.querySelector('#video-title'))||a.title||stateFor(id).title;
-        db.history[id]={title,lastSeen:Date.now()};count++;
-        const st=stateFor(id);if(!isWatched(id))setState(id,{watched:true},false);
+        const percent = historyProgressPercent(node);
+        const previous = db.history[id] || {};
+        db.history[id] = {
+          title,
+          lastSeen: Date.now(),
+          percent,
+          signature: String(percent ?? '') + ':' + String(text(node.querySelector('#video-title')) || title)
+        };
+        count++;
+        if (db.settings.importHistoryProgress && percent !== null && shouldAutoCompletePercentage(percent, stateFor(id).duration || db.series.flatMap(series=>series.episodes).find(ep=>ep.id===id)?.duration || 0)) {
+          const state = stateFor(id);
+          if (state.completionOverride !== 'UNWATCHED' && state.completionOverride !== 'WATCHED') {
+            setState(id,{watched:true,completionOverride:'AUTO'},false);
+          }
+        }
       }catch(_){}
     }
     saveDB();renderPanel();toast(`History scan found ${count} tracked episode(s). Scroll down to load more history, then scan again.`);
