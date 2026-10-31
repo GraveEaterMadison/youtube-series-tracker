@@ -35,7 +35,7 @@ test('version and Greasy Fork listing metadata are complete and consistent', () 
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   const version = source.match(/^\/\/ @version\s+(.+)$/m)?.[1]?.trim();
   assert.equal(version, pkg.version);
-  assert.match(source, /^\/\/ @license\s+MIT$/m);
+  assert.match(source, /^\/\/ @license\s+GPL-3\.0-only$/m);
   assert.match(source, /^\/\/ @homepageURL\s+https:\/\/github\.com\/GraveEaterMadison\/youtube-series-tracker$/m);
   assert.match(source, /^\/\/ @supportURL\s+https:\/\/github\.com\/GraveEaterMadison\/youtube-series-tracker\/issues$/m);
 });
@@ -57,7 +57,7 @@ test('sidebar button relocates when YouTube navigation loads after the userscrip
 });
 
 test('one-by-one series builder actions are wired and versioned', () => {
-  assert.match(source, /^\/\/ @version\s+2\.8\.0$/m);
+  assert.match(source, /^\/\/ @version\s+2\.9\.0$/m);
   assert.match(source, /id="yst2-add-current"/);
   assert.match(source, /function showAddVideoDialog\(\)/);
   assert.match(source, /function saveVideoToSeries\(series, meta\)/);
@@ -440,7 +440,11 @@ test('Morphe-style completion policy supports percentage and remaining-time comp
   assert.equal(complete(920, 1000, 0.92, 30, false), true);
   assert.equal(complete(850, 1000, 0.92, 30, false), false);
   assert.equal(complete(970, 1000, 1, 30, false), true);
-  assert.equal(complete(500, 1000, 0.92, 30, true), true);
+  // An ENDED event flushes a checkpoint; it must not bypass completion policy.
+  assert.equal(complete(500, 1000, 0.92, 30, true), false);
+  assert.equal(complete(920, 1000, 0.92, 30, true), true);
+  assert.equal(complete(570, 600, 0.92, 30, false), true);
+  assert.equal(complete(500, 600, 0.92, 30, false), false);
   assert.equal(complete(50, 0, 0.92, 30, false), false);
 });
 
@@ -594,7 +598,7 @@ test('player follow flow exposes start-order and previous-episode options', () =
 test('playlist and player navigation controls have independent actions', () => {
   assert.match(source,/function addPlaylistFollowButton\(\)/);
   assert.match(source,/id=PLAYLIST_BTN/);
-  assert.match(source,/function navigateSeries\(direction\)/);
+  assert.match(source,/function navigateSeries\(direction, nativeOwned = false\)/);
   assert.match(source,/addNav\(PLAYER_PREV_BTN,/);
   assert.match(source,/addNav\(PLAYER_NEXT_BTN,/);
   assert.match(source,/id="yst2-player-visible"/);
@@ -603,7 +607,8 @@ test('playlist and player navigation controls have independent actions', () => {
 test('local progress and History import are independently configurable', () => {
   assert.match(source,/id="yst2-record-progress"/);
   assert.match(source,/id="yst2-import-history"/);
-  assert.match(source,/db\.settings\.recordPlaybackProgress===false/);
+  assert.match(source,/function recordingAllowed\(\)/);
+  assert.match(source,/accountConsentAllows\(db\.settings\.recordPlaybackProgress === true, activeAccountDigest, privacy\.consentAccount\)/);
   assert.match(source,/db\.settings\.importHistoryProgress && percent !== null/);
   assert.match(source,/state\.completionOverride !== 'UNWATCHED'/);
 });
@@ -750,6 +755,133 @@ test('History page gets a non-destructive Series entry point', () => {
   assert.match(source, /activeTab='library'; openPanel\(\)/);
 });
 
+
+
+
+
+
+
+test('Series episode launch always passes an explicit zero or resume timestamp', () => {
+  assert.match(source, /const startAt=resume&&!startsHere&&!isWatched\(e\.id\)\?Math\.max\(0,Number\(st\.position\)\|\|0\):0/);
+  assert.match(source, /destination\.searchParams\.set\('t',Math\.floor\(startAt\)\+'s'\)/);
+});
+
+
+test('native YouTube player navigation follows an explicitly started Series session', () => {
+  assert.match(source, /const SERIES_SESSION_KEY = 'yst2-series-playback-session'/);
+  assert.match(source, /function readSeriesPlaybackSession\(\)/);
+  assert.match(source, /function writeSeriesPlaybackSession\(value\)/);
+  assert.match(source, /function clearSeriesPlaybackSession\(\)/);
+  assert.match(source, /function installNativeSeriesNavigation\(\)/);
+  assert.match(source, /#movie_player \.ytp-next-button, #movie_player \.ytp-prev-button/);
+  assert.match(source, /function handleOwnedSeriesRouteChange\(nextVideoId\)/);
+  assert.match(source, /if \(nextVideoId === expected\.id && incomingOccurrence\?\.order === expected\.order\)/);
+  assert.match(source, /if \(previous && nextVideoId === previous\.id && incomingOccurrence\?\.order === previous\.order\)/);
+  assert.match(source, /writeSeriesPlaybackSession\(activePlaybackSession\)/);
+  assert.match(source, /navigateSeries\(direction, true\)/);
+  assert.match(source, /clearSeriesPlaybackSession\(\);routeChanged\(\)/);
+});
+
+
+test('playback checkpoints wait for advancing stable media and flush on pause or page hide', () => {
+  assert.match(source, /let candidateAt=performance\.now\(\)/);
+  assert.match(source, /now-candidateAt<500/);
+  assert.match(source, /now-stableDurationAt<3000/);
+  assert.match(source, /growingDuration/);
+  assert.match(source, /video\.addEventListener\('playing',onPlaying\)/);
+  assert.match(source, /video\.addEventListener\('pause',onPause\)/);
+  assert.match(source, /document\.addEventListener\('visibilitychange',onVisibility\)/);
+  assert.match(source, /window\.addEventListener\('pagehide',onPageHide\)/);
+  assert.match(source, /expectedGeneration!==privacyGeneration\|\|!recordingAllowed\(\)/);
+});
+
+
+test('recording consent is bound to a known active YouTube account', () => {
+  const allows = vm.runInNewContext('(' + extractSimpleFunction(source, 'accountConsentAllows') + ')');
+  assert.equal(allows(true, '', ''), false);
+  assert.equal(allows(true, 'account-a', ''), false);
+  assert.equal(allows(true, 'account-a', 'account-b'), false);
+  assert.equal(allows(false, 'account-a', 'account-a'), false);
+  assert.equal(allows(true, 'account-a', 'account-a'), true);
+  assert.match(source, /function accountIdentitySource\(\)/);
+  assert.match(source, /DATASYNC_ID/);
+  assert.match(source, /crypto\.subtle\.digest\('SHA-256'/);
+  assert.match(source, /accountConsentAllows\(db\.settings\.recordPlaybackProgress === true, activeAccountDigest, privacy\.consentAccount\)/);
+});
+
+test('YouTube History sync is separate opt-in and account-scoped', () => {
+  assert.match(source, /id="yst2-sync-youtube"/);
+  assert.match(source, /function syncYouTubeHistory\(force = false, selectedSeries = ''\)/);
+  assert.match(source, /credentials: 'same-origin'/);
+  assert.match(source, /browseId: 'FEhistory'/);
+  assert.match(source, /privacy\.syncAccount === activeAccountDigest/);
+  assert.match(source, /YouTube account changed; History sync was stopped/);
+  assert.match(source, /clearedProgressAt/);
+  assert.match(source, /function historyAccountState\(\)/);
+});
+
+
+test('account History sync runs on library open and periodically while the library remains open', () => {
+  assert.match(source, /function openPanel\(\)[^\n]*refreshAccountContext\(\)\.then\(\(\)=>\{if\(syncAllowed\(\)\)syncYouTubeHistory\(false\);\}/);
+  assert.match(source, /historySyncLastAt && Date\.now\(\) - historySyncLastAt < 30 \* 1000/);
+  assert.match(source, /syncAllowed\(\)&&document\.getElementById\(PANEL\)\?\.classList\.contains\('open'\)/);
+});
+
+
+
+test('Continue performs a bounded History catch-up for only the selected series', () => {
+  assert.match(source, /async function syncYouTubeHistory\(force = false, selectedSeries = ''\)/);
+  assert.match(source, /if \(selectedSeries && series\.id !== selectedSeries\) continue/);
+  assert.match(source, /const maxPages = force \|\| selectedSeries \? 3 : 1/);
+  assert.match(source, /await syncYouTubeHistory\(true,s\.id\)/);
+});
+
+
+test('History API parser reads only video renderers and does not invent resume positions', () => {
+  const walk = (value, fn) => {
+    if (!value || typeof value !== 'object') return;
+    fn(value);
+    if (Array.isArray(value)) { for (const item of value) walk(item, fn); return; }
+    for (const key of Object.keys(value)) walk(value[key], fn);
+  };
+  const rendererText = value => value?.simpleText || '';
+  const parseDuration = value => {
+    const parts = String(value || '').split(':').map(Number);
+    return parts.reduce((total, part) => total * 60 + part, 0);
+  };
+  const parse = vm.runInNewContext('(' + extractSimpleFunction(source, 'historyApiRows') + ')', {
+    walk, rendererText, parseDuration, Map, String, Number
+  });
+  const result = parse({
+    contents: [{ videoRenderer: {
+      videoId: 'aaaaaaaaaaa',
+      title: {simpleText:'Episode 1'},
+      lengthText: {simpleText:'10:00'},
+      thumbnailOverlays: [{thumbnailOverlayProgressBarRenderer:{percentDurationWatched:92}}]
+    }}],
+    continuationContents: {continuations:[{nextContinuationData:{continuation:'next-page'}}]}
+  });
+  assert.equal(result.rows.get('aaaaaaaaaaa').percent, 92);
+  assert.equal(result.rows.get('aaaaaaaaaaa').duration, 600);
+  assert.equal(result.rows.get('aaaaaaaaaaa').title, 'Episode 1');
+  assert.equal(Object.hasOwn(result.rows.get('aaaaaaaaaaa'), 'position'), false);
+  assert.equal(result.continuation, 'next-page');
+});
+
+
+test('History scanning automatically picks up newly loaded rows while scrolling', () => {
+  assert.match(source, /function observeHistoryPage\(\)/);
+  assert.match(source, /historyObserver\.observe\(root,\{childList:true,subtree:true\}\)/);
+  assert.match(source, /setTimeout\(\(\) => \{/);
+  assert.match(source, /scanHistoryPage\(true\)/);
+  assert.match(source, /if \(changed\) saveDB\(\)/);
+  assert.match(source, /Newly loaded History entries are scanned automatically as you scroll/);
+});
+
+test('automatic playback recording is explicitly opt-in by default', () => {
+  assert.match(source, /recordPlaybackProgress: false/);
+  assert.match(source, /id="yst2-record-progress" \$\{recordingAllowed\(\)\?'checked':''\}/);
+});
 
 test('validated native Morphe backups retain bookmark video references', () => {
   const validator = source.slice(source.indexOf('function validateBackupDocument(document)'), source.indexOf('function exportBackup()'));

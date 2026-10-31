@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         YouTube Series Tracker
 // @namespace    https://github.com/GraveEaterMadison/youtube-series-tracker
-// @version      2.8.0
+// @version      2.9.0
 // @description  Follow YouTube playlists as series with guided setup, local progress, resume planning, History matching, and validated backup/restore.
 // @author       Zero
-// @license      MIT
+// @license      GPL-3.0-only
 // @homepageURL  https://github.com/GraveEaterMadison/youtube-series-tracker
 // @supportURL   https://github.com/GraveEaterMadison/youtube-series-tracker/issues
 // @compatible   firefox
@@ -17,6 +17,7 @@
   'use strict';
   const VERSION = 2;
   const KEY = 'yt-series-tracker-v2';
+  const PRIVACY_KEY = 'yt-series-tracker-privacy-v1';
   const LEGACY_KEYS = ['yt-series-tracker-v1'];
   const PANEL = 'yst2-panel';
   const STYLE = 'yst2-style';
@@ -33,11 +34,17 @@
   const PLAYER_PREV_BTN = 'yst2-player-previous';
   const PLAYER_NEXT_BTN = 'yst2-player-next';
   const PLAYLIST_BTN = 'yst2-playlist-action';
+  const SERIES_SESSION_KEY = 'yst2-series-playback-session';
   let undoExpiryTimer = null;
   let activePlaybackSession = null;
   let staleRefreshBusy = false;
   let staleRefreshTimer = null;
   const AUTO_SYNC_KEY = 'yst2-last-sync';
+  let privacy = loadPrivacy();
+  let activeAccountIdentity = '';
+  let activeAccountDigest = '';
+  let privacyGeneration = 0;
+  let accountRefreshPromise = null;
   let db = loadDB();
   let activeTab = 'library';
   let librarySearch = '';
@@ -53,6 +60,89 @@
   const discoveryCache = new Map();
   let currentHistoryScan = '';
   let activeVideoCleanup = null;
+  let historyObserver = null;
+  let historyObserverRoot = null;
+  let historyScanTimer = null;
+
+
+  function loadPrivacy() {
+    try {
+      const value = JSON.parse(localStorage.getItem(PRIVACY_KEY) || '{}');
+      return {
+        salt: /^[A-Za-z0-9_-]{32,128}$/.test(String(value.salt || '')) ? value.salt : '',
+        consentAccount: /^[a-f0-9]{64}$/.test(String(value.consentAccount || '')) ? value.consentAccount : '',
+        syncAccount: /^[a-f0-9]{64}$/.test(String(value.syncAccount || '')) ? value.syncAccount : '',
+        historyBaselines: value.historyBaselines && typeof value.historyBaselines === 'object' ? value.historyBaselines : {},
+        clearedProgressAt: value.clearedProgressAt && typeof value.clearedProgressAt === 'object' ? value.clearedProgressAt : {}
+      };
+    } catch (_) { return { salt: '', consentAccount: '', syncAccount: '', historyBaselines: {}, clearedProgressAt: {} }; }
+  }
+  function savePrivacy() {
+    try { localStorage.setItem(PRIVACY_KEY, JSON.stringify(privacy)); }
+    catch (error) { console.warn('[YouTube Series] Privacy settings could not be saved', error); }
+  }
+  function accountIdentitySource() {
+    try {
+      const cfg = window.ytcfg?.data_ || {};
+      const get = key => window.ytcfg?.get?.(key) ?? cfg[key];
+      const loggedIn = get('LOGGED_IN') === true || String(get('LOGGED_IN')) === '1';
+      const dataSync = String(get('DATASYNC_ID') || '');
+      const delegated = String(get('DELEGATED_SESSION_ID') || '');
+      const session = String(get('SESSION_INDEX') ?? '');
+      const identity = dataSync || delegated;
+      return loggedIn && identity ? identity + ':' + session : '';
+    } catch (_) { return ''; }
+  }
+  async function digestAccountIdentity(identity) {
+    if (!identity || !crypto?.subtle || !crypto?.getRandomValues) return '';
+    if (!privacy.salt) {
+      const bytes = new Uint8Array(24);
+      crypto.getRandomValues(bytes);
+      privacy.salt = Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('');
+      savePrivacy();
+    }
+    const payload = new TextEncoder().encode(privacy.salt + '\\0' + identity);
+    const digest = await crypto.subtle.digest('SHA-256', payload);
+    return Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, '0')).join('');
+  }
+  async function refreshAccountContext() {
+    if (accountRefreshPromise) return accountRefreshPromise;
+    accountRefreshPromise = (async () => {
+      let identity, digest;
+      do {
+        identity = accountIdentitySource();
+        if (identity === activeAccountIdentity) return activeAccountDigest;
+        digest = await digestAccountIdentity(identity);
+      } while (identity !== accountIdentitySource());
+      activeAccountIdentity = identity;
+      activeAccountDigest = digest;
+      privacyGeneration++;
+      clearSeriesPlaybackSession();
+      lastSave = 0;
+      if (document.getElementById(PANEL)?.classList.contains('open')) renderPanel();
+      if (location.pathname.startsWith('/feed/history') && syncAllowed()) syncYouTubeHistory(false);
+      return activeAccountDigest;
+    })();
+    try { return await accountRefreshPromise; }
+    finally { accountRefreshPromise = null; }
+  }
+  function accountConsentAllows(enabled, currentAccount, consentAccount) {
+    return Boolean(enabled && currentAccount && consentAccount && currentAccount === consentAccount);
+  }
+  function recordingAllowed() {
+    return accountConsentAllows(db.settings.recordPlaybackProgress === true, activeAccountDigest, privacy.consentAccount);
+  }
+  function syncAllowed() {
+    return db.settings.syncYouTubeProgress === true
+      && Boolean(activeAccountDigest)
+      && privacy.syncAccount === activeAccountDigest;
+  }
+  function historyAccountState() {
+    if (!activeAccountDigest) return null;
+    if (!privacy.historyBaselines[activeAccountDigest]) privacy.historyBaselines[activeAccountDigest] = {};
+    return privacy.historyBaselines[activeAccountDigest];
+  }
+
 
   function emptyDB() {
     return {
@@ -67,6 +157,7 @@
         historyScan: true,
         catalogAutoRefresh: true,
         recordPlaybackProgress: false,
+        syncYouTubeProgress: false,
         importHistoryProgress: false,
         showPlayerButton: true
       },
@@ -93,7 +184,6 @@
         cursorRevision: Number.isInteger(item.cursorRevision) ? item.cursorRevision : 0,
         newEpisodeIds: Array.isArray(item.newEpisodeIds) ? item.newEpisodeIds.filter(id => /^[A-Za-z0-9_-]{11}$/.test(id)) : [],
         startHereVideoId: /^[A-Za-z0-9_-]{11}$/.test(String(item.startHereVideoId || '')) ? item.startHereVideoId : '',
-        bookmarkVideoId: /^[A-Za-z0-9_-]{11}$/.test(String(item.bookmarkVideoId || '')) ? item.bookmarkVideoId : '',
         bookmarkVideoId: /^[A-Za-z0-9_-]{11}$/.test(String(item.bookmarkVideoId || '')) ? item.bookmarkVideoId : '',
         startHereOrder: Number.isInteger(item.startHereOrder) ? item.startHereOrder : -1,
         lastRefreshAttemptAt: Number(item.lastRefreshAttemptAt) || 0,
@@ -172,7 +262,9 @@
   }
   function isWatched(id) { return isWatchedState(stateFor(id)); }
   function shouldAutoComplete(position, duration, threshold, remainingSeconds, ended = false) {
-    if (ended) return true;
+    // Match Morphe's CompletionPolicy: an ENDED signal is only a checkpoint,
+    // never proof of completion by itself. Require a valid duration and tail threshold.
+    void ended;
     if (!Number.isFinite(position) || position < 0 || !Number.isFinite(duration) || duration <= 0) return false;
     const fraction = Math.max(0, Math.min(1, Number(threshold)));
     // HTMLMediaElement.currentTime and duration are seconds; native Morphe code stores milliseconds.
@@ -204,7 +296,8 @@
       database: {
         series: JSON.parse(JSON.stringify(db.series)),
         episodes: JSON.parse(JSON.stringify(db.episodes)),
-        history: JSON.parse(JSON.stringify(db.history))
+        history: JSON.parse(JSON.stringify(db.history)),
+        clearedProgressAt: { ...privacy.clearedProgressAt }
       },
       description,
       expiresAt: Date.now() + UNDO_WINDOW_MS
@@ -222,6 +315,8 @@
       db.series = JSON.parse(JSON.stringify(lastUndo.database.series));
       db.episodes = JSON.parse(JSON.stringify(lastUndo.database.episodes));
       db.history = JSON.parse(JSON.stringify(lastUndo.database.history));
+      if (lastUndo.database.clearedProgressAt) privacy.clearedProgressAt = { ...lastUndo.database.clearedProgressAt };
+      savePrivacy();
     }
     for (const [id, old] of Object.entries(lastUndo.before || {})) {
       if (old === null) delete db.episodes[id];
@@ -1294,21 +1389,22 @@
     if (idx >= 0) return eps.slice(idx + 1).find(e => !isWatched(e.id)) || null;
     return chooseContinue(s);
   }
-  function navigateSeries(direction) {
+  function navigateSeries(direction, nativeOwned = false) {
     const videoId=getVideoId(), listId=getPlaylistId();
     let series=activePlaybackSession?findSeries(activePlaybackSession.seriesId):null;
     if(!series||!series.episodes.some(ep=>ep.id===videoId)){
       const candidates=db.series.filter(item=>episodeOccurrence(item,videoId,item.playlistId===listId?currentPlaylistIndex():-1));
       series=candidates.length===1?candidates[0]:null;
     }
-    if(!series){toast('This video is not in a followed series.');return false;}
-    const requestedOrder=series.playlistId===listId?currentPlaylistIndex():-1;
+    if(!series){if(nativeOwned)return true;toast('This video is not in a followed series.');return false;}
+    if(nativeOwned&&(!activePlaybackSession||activePlaybackSession.videoId!==videoId))return false;
+    const requestedOrder=activePlaybackSession?.videoId===videoId?activePlaybackSession.order:(series.playlistId===listId?currentPlaylistIndex():-1);
     const occurrence=episodeOccurrence(series,videoId,requestedOrder);
-    if(!occurrence){toast('Could not identify this episode occurrence.');return false;}
+    if(!occurrence){toast('Could not identify this episode occurrence.');return nativeOwned;}
     const episodes=orderedEpisodes(series).filter(ep=>ep.available!==false&&!ep.unavailable&&/^[A-Za-z0-9_-]{11}$/.test(ep.id));
     const index=episodes.findIndex(ep=>ep.id===videoId&&ep.order===occurrence.order);
     const target=episodes[index+direction];
-    if(!target){toast(direction<0?'This is the first episode.':'This is the last episode.');return false;}
+    if(!target){toast(direction<0?'This is the first episode.':'This is the last episode.');return nativeOwned;}
     openEpisode(series,target,true);
     return true;
   }
@@ -1323,8 +1419,12 @@
     s.cursorUpdatedAt = Date.now();
     s.cursorRevision = Number(s.catalogRevision) || 0;
     activePlaybackSession = {seriesId:s.id,videoId:e.id,order:e.order,catalogRevision:Number(s.catalogRevision)||0};
+    writeSeriesPlaybackSession(activePlaybackSession);
     saveDB();
-    location.href = urlFor(e.id, s.playlistId, s.playlistId ? e.order : undefined, resume && !startsHere && !isWatched(e.id) ? st.position : 0);
+    const startAt=resume&&!startsHere&&!isWatched(e.id)?Math.max(0,Number(st.position)||0):0;
+    const destination=new URL(urlFor(e.id,s.playlistId,s.playlistId?e.order:undefined,startAt),location.origin);
+    destination.searchParams.set('t',Math.floor(startAt)+'s');
+    location.href=destination.toString();
   }
   function setSeriesStartHere(series, episode) {
     if (!series || !episode || episode.available === false || episode.unavailable || !/^[A-Za-z0-9_-]{11}$/.test(episode.id)) return false;
@@ -1835,15 +1935,17 @@
       <label class="yst2-setting"><input type="checkbox" id="yst2-autosync" ${s.autoSyncOnOpen?'checked':''}> Automatically refresh the current tracked playlist when opened</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-sidebar" ${s.showSidebarButton!==false?'checked':''}> Show Series in YouTube navigation</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-player-visible" ${s.showPlayerButton!==false?'checked':''}> Show Series and previous/next controls in the player</label>
-      <label class="yst2-setting"><input type="checkbox" id="yst2-record-progress" ${s.recordPlaybackProgress!==false?'checked':''}> Record local playback progress for followed episodes</label>
+      <label class="yst2-setting"><input type="checkbox" id="yst2-record-progress" ${recordingAllowed()?'checked':''}> Record local playback progress for followed episodes</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-import-history" ${s.importHistoryProgress?'checked':''}> Use visible History progress bars for completion</label>
+      <label class="yst2-setting"><input type="checkbox" id="yst2-sync-youtube" ${syncAllowed()?'checked':''}> Sync progress from this YouTube account's History</label>
+      <button id="yst2-sync-history-now" class="yst2-subbtn">Sync YouTube History now</button>
       <label class="yst2-setting"><input type="checkbox" id="yst2-auto-catalog" ${s.catalogAutoRefresh!==false?'checked':''}> Refresh stale followed playlists automatically</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-historyscan" ${s.historyScan?'checked':''}> Match YouTube History page videos to known episodes</label>
-      <p class="yst2-muted">History import uses only progress indicators currently rendered on the History page. It never reads account identifiers or sends progress to a server.</p>
+      <p class="yst2-muted">Visible History scanning reads only rendered rows. Account History sync is a separate opt-in: it reads your YouTube History through YouTube's own same-origin endpoint, stores only an account-scoped digest locally, and never sends your progress to a third-party server. Unknown accounts are not synced.</p>
       <button id="yst2-clear-progress" class="yst2-subbtn">Clear playback progress (keep series)</button>
       <button id="yst2-clear-history" class="yst2-subbtn">Clear History matches</button>
-      <p class="yst2-muted">Progress is stored in this Firefox profile on YouTube. It does not sync to Morphe or your Google account. You can export a backup at any time.</p>
-      <button id="yst2-clear" class="yst2-subbtn dangerbtn">Delete all series and progress</button></section>
+      <p class="yst2-muted">Playback progress is stored locally in this Firefox profile and is never uploaded to Morphe or Google. If separately enabled, History sync reads YouTube's own account History to update local completion state. You can export a backup at any time.</p>
+      <button id="yst2-clear" class="yst2-subbtn dangerbtn">Delete all series and progress</button><p class="yst2-muted">Modified browser adaptation of thryyy/morphe-series-tracker and Morphe Patches. Distributed under GPL-3.0-only with required notices. <a href="https://github.com/GraveEaterMadison/youtube-series-tracker/blob/feature/morphe-style-auto-follow/LICENSE" target="_blank" rel="noopener">License</a> · <a href="https://github.com/GraveEaterMadison/youtube-series-tracker/blob/feature/morphe-style-auto-follow/NOTICE" target="_blank" rel="noopener">Notices</a></p></section>
       <section class="yst2-series"><h3>Data tools</h3><button id="yst2-recount" class="yst2-subbtn">Recalculate watched status from saved positions</button><button id="yst2-markall" class="yst2-subbtn">Mark current series watched</button></section>`;
   }
   function renderHistory() {
@@ -1891,7 +1993,7 @@
     p.querySelectorAll('[data-play]').forEach(b=>b.addEventListener('click',()=>{if(b.disabled)return;const s=db.series.find(x=>x.id===b.dataset.sid),e=s?.episodes.find(x=>x.id===b.dataset.play);if(s&&e)openEpisode(s,e);}));
     p.querySelectorAll('[data-hide-watched]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.hideWatched);if(!s)return;s.hideWatched=!s.hideWatched;saveDB();renderPanel();toast(s.hideWatched?'Watched episodes hidden.':'Watched episodes shown.');}));
     p.querySelectorAll('[data-order]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.order);if(!s)return;s.playbackReverse=!s.playbackReverse;saveDB();renderPanel();toast('Episode order: '+(s.playbackReverse?'chronological':'playlist')+'.');}));
-    p.querySelectorAll('[data-continue]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.continue);const plan=s&&resumePlan(s);if(s&&plan?.episode){acknowledgeNewEpisodes(s.id);openEpisode(s,plan.episode);}}));
+    p.querySelectorAll('[data-continue]').forEach(b=>b.addEventListener('click',async()=>{let s=db.series.find(x=>x.id===b.dataset.continue);if(!s)return;if(syncAllowed())await syncYouTubeHistory(true,s.id);s=db.series.find(x=>x.id===b.dataset.continue);const plan=s&&resumePlan(s);if(s&&plan?.episode){acknowledgeNewEpisodes(s.id);openEpisode(s,plan.episode);}}));
     p.querySelectorAll('[data-recovery]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.recovery);if(s)showRecoveryChooser(s);}));
     p.querySelectorAll('[data-ack-new]').forEach(b=>b.addEventListener('click',()=>acknowledgeNewEpisodes(b.dataset.ackNew)));
     p.querySelectorAll('[data-open-playlist]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.openPlaylist);if(s?.playlistId)location.href='/playlist?list='+encodeURIComponent(s.playlistId);}));
@@ -1907,20 +2009,22 @@
     p.querySelector('#yst2-export')?.addEventListener('click',exportBackup);
     p.querySelector('#yst2-export-morphe')?.addEventListener('click',exportMorpheBackup);
     p.querySelector('#yst2-import')?.addEventListener('click',importBackup);
-    p.querySelector('#yst2-enabled')?.addEventListener('change',e=>{db.settings.enabled=e.target.checked;saveDB();if(!e.target.checked){if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;}activePlaybackSession=null;currentVideoId='';activeVideo=null;addSidebarButton();addPlayerButton();addPlaylistFollowButton();toast('Series Tracker disabled. Your saved data is kept.');}else{ensureUI();trackCurrentVideo();toast('Series Tracker enabled.');}});
+    p.querySelector('#yst2-enabled')?.addEventListener('change',e=>{db.settings.enabled=e.target.checked;saveDB();observeHistoryPage();if(!e.target.checked){if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;}clearSeriesPlaybackSession();currentVideoId='';activeVideo=null;addSidebarButton();addPlayerButton();addPlaylistFollowButton();toast('Series Tracker disabled. Your saved data is kept.');}else{ensureUI();trackCurrentVideo();toast('Series Tracker enabled.');}});
     p.querySelector('#yst2-threshold')?.addEventListener('change',e=>{db.settings.watchedThreshold=Number(e.target.value);saveDB();});
     p.querySelector('#yst2-remaining')?.addEventListener('change',e=>{db.settings.watchedRemainingSeconds=Number(e.target.value);saveDB();});
     p.querySelector('#yst2-autonext')?.addEventListener('change',e=>{db.settings.autoNext=e.target.checked;saveDB();});
     p.querySelector('#yst2-autosync')?.addEventListener('change',e=>{db.settings.autoSyncOnOpen=e.target.checked;saveDB();});
-    p.querySelector('#yst2-historyscan')?.addEventListener('change',e=>{db.settings.historyScan=e.target.checked;saveDB();});
+    p.querySelector('#yst2-historyscan')?.addEventListener('change',e=>{db.settings.historyScan=e.target.checked;saveDB();observeHistoryPage();});
     p.querySelector('#yst2-sidebar')?.addEventListener('change',e=>{db.settings.showSidebarButton=e.target.checked;saveDB();addSidebarButton();});
     p.querySelector('#yst2-player-visible')?.addEventListener('change',e=>{db.settings.showPlayerButton=e.target.checked;saveDB();addPlayerButton();});
-    p.querySelector('#yst2-record-progress')?.addEventListener('change',e=>{if(e.target.checked&&!confirm('Record playback progress for followed episodes in this browser? This stays in YouTube local storage and is not sent to Morphe or Google.')){e.target.checked=false;return;}db.settings.recordPlaybackProgress=e.target.checked;saveDB();if(!e.target.checked)activePlaybackSession=null;});
-    p.querySelector('#yst2-import-history')?.addEventListener('change',e=>{db.settings.importHistoryProgress=e.target.checked;saveDB();});
+    p.querySelector('#yst2-record-progress')?.addEventListener('change',async e=>{const enabled=e.target.checked;if(!enabled){db.settings.recordPlaybackProgress=false;privacy.consentAccount='';savePrivacy();saveDB();clearSeriesPlaybackSession();privacyGeneration++;return;}e.target.disabled=true;try{const digest=await refreshAccountContext();if(!digest){e.target.checked=false;toast('Sign in to YouTube before enabling account-bound progress recording.');return;}if(!confirm('Enable local playback recording for this YouTube account? Progress stays in this browser. It is disabled automatically when the active account changes; no account identifier is stored or sent.')){e.target.checked=false;return;}privacy.consentAccount=digest;savePrivacy();db.settings.recordPlaybackProgress=true;saveDB();privacyGeneration++;toast('Playback recording enabled for this account.');}finally{e.target.disabled=false;}});
+    p.querySelector('#yst2-import-history')?.addEventListener('change',e=>{db.settings.importHistoryProgress=e.target.checked;saveDB();if(location.pathname.startsWith('/feed/history'))scanHistoryPage(true);});
+    p.querySelector('#yst2-sync-youtube')?.addEventListener('change',async e=>{const enabled=e.target.checked;if(!enabled){db.settings.syncYouTubeProgress=false;privacy.syncAccount='';savePrivacy();saveDB();return;}e.target.disabled=true;try{const digest=await refreshAccountContext();if(!digest){e.target.checked=false;toast('Sign in to YouTube before enabling History sync.');return;}if(!confirm('Allow this tracker to read your YouTube History for followed episodes on this account? Only matching episode progress is stored locally; no account identifier or progress is sent to a third party.')){e.target.checked=false;return;}privacy.syncAccount=digest;savePrivacy();db.settings.syncYouTubeProgress=true;saveDB();syncYouTubeHistory(true);}finally{e.target.disabled=false;}});
+    p.querySelector('#yst2-sync-history-now')?.addEventListener('click',()=>syncYouTubeHistory(true));
     p.querySelector('#yst2-auto-catalog')?.addEventListener('change',e=>{db.settings.catalogAutoRefresh=e.target.checked;saveDB();if(e.target.checked)refreshStaleSeries();});
-    p.querySelector('#yst2-clear-progress')?.addEventListener('click',()=>{if(confirm('Clear all playback positions and watched states but keep series catalogs?')){rememberDatabaseUndo('clear playback progress');db.episodes={};saveDB();renderPanel();toast('Playback progress cleared. Undo is available for 8 seconds.');}});
+    p.querySelector('#yst2-clear-progress')?.addEventListener('click',()=>{if(confirm('Clear all playback positions and watched states but keep series catalogs?')){rememberDatabaseUndo('clear playback progress');const clearedAt=Date.now();for(const id of Object.keys(db.episodes))privacy.clearedProgressAt[id]=clearedAt;savePrivacy();db.episodes={};saveDB();renderPanel();toast('Playback progress cleared. Undo is available for 8 seconds.');}});
     p.querySelector('#yst2-clear-history')?.addEventListener('click',()=>{if(confirm('Clear local History matches only?')){rememberDatabaseUndo('clear History matches');db.history={};saveDB();renderPanel();toast('History matches cleared. Undo is available for 8 seconds.');}});
-    p.querySelector('#yst2-clear')?.addEventListener('click',()=>{if(confirm('Permanently delete all series, episode progress, and History matches?')){rememberDatabaseUndo('delete all tracker data');db=emptyDB();saveDB();renderPanel();toast('Tracker data deleted. Undo is available for 8 seconds.');}});
+    p.querySelector('#yst2-clear')?.addEventListener('click',()=>{if(confirm('Permanently delete all series, episode progress, and History matches?')){rememberDatabaseUndo('delete all tracker data');const clearedAt=Date.now();for(const id of Object.keys(db.episodes))privacy.clearedProgressAt[id]=clearedAt;savePrivacy();db=emptyDB();saveDB();renderPanel();toast('Tracker data deleted. Undo is available for 8 seconds.');}});
     p.querySelector('#yst2-recount')?.addEventListener('click',()=>{rememberUndo(Object.keys(db.episodes),'recalculate completion');for(const [id,st] of Object.entries(db.episodes)){setState(id,{watched:shouldAutoComplete(st.position,st.duration,Number(db.settings.watchedThreshold),Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS)),completionOverride:'AUTO'},false);}saveDB();renderPanel();toast('Automatic completion recalculated.');});
     p.querySelector('#yst2-markall')?.addEventListener('click',()=>{const s=findSeries(getPlaylistId());if(!s){toast('Open a tracked series playlist first.');return;}const playable=s.episodes.filter(e=>e.available!==false&&!e.unavailable&&/^[A-Za-z0-9_-]{11}$/.test(e.id));if(confirm(`Mark all ${playable.length} playable episodes watched?`)){rememberUndo(playable.map(e=>e.id),'mark all episodes watched');const now=Date.now();for(const e of playable){const old=stateFor(e.id);const already=isWatched(e.id);db.episodes[e.id]={...old,watched:true,completionOverride:'WATCHED',position:old.duration||e.duration||old.position,duration:old.duration||e.duration||0,updatedAt:now,lastWatchedAt:already?old.lastWatchedAt:now};}saveDB();renderPanel();toast('All playable episodes marked watched.');}});
     p.querySelector('#yst2-scanhistory')?.addEventListener('click',scanHistoryPage);
@@ -2204,34 +2308,217 @@
     }
     return null;
   }
-  function scanHistoryPage() {
-    if (!location.pathname.startsWith('/feed/history')) { toast('Open youtube.com/feed/history first, then select Scan History.'); return; }
+
+  let historySyncBusy = false;
+  let historySyncLastAt = 0;
+  function historyApiRows(data) {
+    const rows = new Map();
+    let continuation = '';
+    walk(data, node => {
+      if (!node || typeof node !== 'object') return;
+      const renderer = node.videoRenderer || node.gridVideoRenderer;
+      if (renderer && /^[A-Za-z0-9_-]{11}$/.test(String(renderer.videoId || ''))) {
+        let percent = null;
+        for (const overlay of renderer.thumbnailOverlays || []) {
+          const bar = overlay?.thumbnailOverlayProgressBarRenderer;
+          const value = Number(bar?.percentDurationWatched);
+          if (Number.isFinite(value) && value >= 0 && value <= 100) percent = value;
+        }
+        const duration = parseDuration(renderer.lengthText?.simpleText || renderer.lengthText?.runs?.map(run=>run.text).join('') || '');
+        rows.set(renderer.videoId, {
+          id: renderer.videoId,
+          title: rendererText(renderer.title) || '',
+          percent,
+          duration,
+          signature: String(percent ?? '') + ':' + String(duration || 0)
+        });
+      }
+      if (!continuation && node.nextContinuationData?.continuation) continuation = String(node.nextContinuationData.continuation);
+      if (!continuation && node.continuationCommand?.token) continuation = String(node.continuationCommand.token);
+    });
+    return { rows, continuation };
+  }
+  async function fetchHistoryApiPage(continuation) {
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error('YouTube History API key is unavailable on this page.');
+    const context = getClientContext();
+    const client = context?.client || {};
+    const version = String(client.clientVersion || '');
+    if (!version) throw new Error('YouTube client context is unavailable.');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    try {
+      const response = await fetch('/youtubei/v1/browse?key=' + encodeURIComponent(apiKey) + '&prettyPrint=false', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-YouTube-Client-Name': '1',
+          'X-YouTube-Client-Version': version
+        },
+        body: JSON.stringify(continuation ? { context, continuation } : { context, browseId: 'FEhistory' }),
+        signal: controller.signal
+      });
+      if (!response.ok) throw new Error('YouTube History request failed (HTTP ' + response.status + ').');
+      const body = await response.text();
+      if (body.length > 8 * 1024 * 1024) throw new Error('YouTube History response exceeded the 8 MB safety limit.');
+      return historyApiRows(JSON.parse(body));
+    } finally { clearTimeout(timeout); }
+  }
+  async function syncYouTubeHistory(force = false, selectedSeries = '') {
+    if (historySyncBusy || !syncAllowed()) return;
+    if (!force && historySyncLastAt && Date.now() - historySyncLastAt < 30 * 1000) return;
+    historySyncBusy = true;
+    historySyncLastAt = Date.now();
+    const initialGeneration = privacyGeneration;
+    const initialAccount = activeAccountDigest;
+    let changed = false, imported = 0, pages = 0;
+    try {
+      const known = new Map();
+      for (const series of db.series) {
+        if (selectedSeries && series.id !== selectedSeries) continue;
+        for (const episode of series.episodes || []) {
+          if (episode.available === false || episode.unavailable || !/^[A-Za-z0-9_-]{11}$/.test(episode.id)) continue;
+          known.set(episode.id, Math.max(known.get(episode.id) || 0, Number(episode.duration) || Number(stateFor(episode.id).duration) || 0));
+        }
+        if (/^[A-Za-z0-9_-]{11}$/.test(String(series.bookmarkVideoId || ''))) {
+          const id = series.bookmarkVideoId;
+          known.set(id, Math.max(known.get(id) || 0, Number(stateFor(id).duration) || 0));
+        }
+      }
+      if (!known.size) { toast('Follow a series before syncing its History progress.'); return; }
+      const baselines = historyAccountState();
+      if (!baselines) throw new Error('The active YouTube account could not be identified.');
+      let token = '';
+      const maxPages = force || selectedSeries ? 3 : 1;
+      for (let page = 0; page < maxPages; page++) {
+        await refreshAccountContext();
+        if (initialGeneration !== privacyGeneration || initialAccount !== activeAccountDigest || !syncAllowed()) throw new Error('YouTube account changed; History sync was stopped.');
+        const result = await fetchHistoryApiPage(token);
+        pages++;
+        const observedAt = Date.now();
+        for (const [id, row] of result.rows) {
+          if (!known.has(id)) continue;
+          const previous = baselines[id];
+          const duration = known.get(id) || row.duration || Number(stateFor(id).duration) || 0;
+          const signature = row.signature;
+          const clearedAt = Number(privacy.clearedProgressAt[id]) || 0;
+          const unchanged = previous && previous.signature === signature;
+          if (!unchanged && row.percent !== null && duration > 0) {
+            const old = stateFor(id);
+            const localChangedAfterBaseline = previous && Number(old.updatedAt) > Number(previous.seenAt);
+            const clearedAfterBaseline = clearedAt > 0 && (!previous || clearedAt >= Number(previous.seenAt));
+            if (!localChangedAfterBaseline && !clearedAfterBaseline
+                && old.completionOverride !== 'WATCHED' && old.completionOverride !== 'UNWATCHED') {
+              const complete = shouldAutoCompletePercentage(row.percent, duration, Number(db.settings.watchedThreshold));
+              if (Boolean(old.watched) !== complete) {
+                setState(id, {
+                  title: row.title || old.title,
+                  watched: complete,
+                  completionOverride: 'AUTO',
+                  duration: old.duration || duration
+                }, false);
+                changed = true;
+                imported++;
+              }
+            }
+          }
+          if (!unchanged) {
+            baselines[id] = { signature, seenAt: observedAt };
+            changed = true;
+          }
+        }
+        token = result.continuation;
+        if (!token || pages >= maxPages) break;
+        let missing = false;
+        for (const id of known.keys()) if (!result.rows.has(id)) { missing = true; break; }
+        if (!missing) break;
+      }
+      await refreshAccountContext();
+      if (initialGeneration !== privacyGeneration || initialAccount !== activeAccountDigest || !syncAllowed()) throw new Error('YouTube account changed; History sync was stopped.');
+      if (changed) { savePrivacy(); saveDB(); if (document.getElementById(PANEL)?.classList.contains('open')) renderPanel(); }
+      historySyncLastAt = Date.now();
+      toast('YouTube History checked (' + pages + ' page' + (pages === 1 ? '' : 's') + '); ' + imported + ' completion update' + (imported === 1 ? '' : 's') + ' imported.');
+    } catch (error) {
+      console.warn('[YouTube Series] History sync failed', error);
+      toast(error?.name === 'AbortError' ? 'YouTube History sync timed out.' : (error.message || 'YouTube History sync failed.'));
+    } finally { historySyncBusy = false; }
+  }
+
+  function scanHistoryPage(quiet = false) {
+    if (db.settings.enabled === false || db.settings.historyScan === false) return 0;
+    if (!location.pathname.startsWith('/feed/history')) {
+      if (!quiet) toast('Open youtube.com/feed/history first, then select Scan History.');
+      return 0;
+    }
     const matched = new Set(db.series.flatMap(s=>s.episodes.map(e=>e.id)));
-    let count=0;
+    let count=0, changed=false;
+    const durationById = new Map();
+    for (const series of db.series) for (const episode of series.episodes) {
+      if (!durationById.has(episode.id) && Number(episode.duration)>0) durationById.set(episode.id,Number(episode.duration));
+    }
     for(const node of document.querySelectorAll('ytd-video-renderer,ytd-grid-video-renderer,ytd-rich-item-renderer')) {
       const a=node.querySelector('a#video-title, a#thumbnail[href*="watch"]');if(!a)continue;
       try {
         const id=new URL(a.href,location.origin).searchParams.get('v');if(!id||!matched.has(id))continue;
         const title=text(node.querySelector('#video-title'))||a.title||stateFor(id).title;
         const percent = historyProgressPercent(node);
+        const signature = String(percent ?? '') + ':' + String(text(node.querySelector('#video-title')) || title);
         const previous = db.history[id] || {};
-        db.history[id] = {
-          title,
-          lastSeen: Date.now(),
-          percent,
-          signature: String(percent ?? '') + ':' + String(text(node.querySelector('#video-title')) || title)
-        };
+        if (previous.signature !== signature || !previous.lastSeen) {
+          db.history[id] = { title, lastSeen: Date.now(), percent, signature };
+          changed=true;
+        }
         count++;
-        if (db.settings.importHistoryProgress && percent !== null && shouldAutoCompletePercentage(percent, stateFor(id).duration || db.series.flatMap(series=>series.episodes).find(ep=>ep.id===id)?.duration || 0)) {
+        if (db.settings.importHistoryProgress && percent !== null
+            && shouldAutoCompletePercentage(percent, stateFor(id).duration || durationById.get(id) || 0)) {
           const state = stateFor(id);
-          if (state.completionOverride !== 'UNWATCHED' && state.completionOverride !== 'WATCHED') {
+          if (!state.watched && state.completionOverride !== 'UNWATCHED' && state.completionOverride !== 'WATCHED') {
             setState(id,{watched:true,completionOverride:'AUTO'},false);
+            changed=true;
           }
         }
       }catch(_){}
     }
-    saveDB();renderPanel();toast(`History scan found ${count} tracked episode(s). Scroll down to load more history, then scan again.`);
+    if (changed) saveDB();
+    if (changed && document.getElementById(PANEL)?.classList.contains('open')) renderPanel();
+    if (!quiet) toast('History scan found ' + count + ' tracked episode(s). Newly loaded History entries are scanned automatically as you scroll.');
+    return count;
   }
+
+  function observeHistoryPage() {
+    const onHistory = location.pathname.startsWith('/feed/history');
+    if (!onHistory || db.settings.enabled === false || db.settings.historyScan === false) {
+      if (historyObserver) historyObserver.disconnect();
+      historyObserver = null;
+      historyObserverRoot = null;
+      if (historyScanTimer) clearTimeout(historyScanTimer);
+      historyScanTimer = null;
+      return;
+    }
+    const root = document.querySelector('ytd-browse[page-subtype="history"] #contents')
+      || document.querySelector('ytd-browse[page-subtype="history"] #primary')
+      || document.querySelector('ytd-browse[page-subtype="history"]');
+    if (!root || root === historyObserverRoot) return;
+    if (historyObserver) historyObserver.disconnect();
+    historyObserverRoot = root;
+    historyObserver = new MutationObserver(records => {
+      const relevant = records.some(record => {
+        const target = record.target && (record.target.nodeType === 1 ? record.target : record.target.parentElement);
+        return !target || !target.closest || !target.closest('#yst2-panel');
+      });
+      if (!relevant) return;
+      if (historyScanTimer) clearTimeout(historyScanTimer);
+      historyScanTimer = setTimeout(() => {
+        historyScanTimer = null;
+        if (root.isConnected && location.pathname.startsWith('/feed/history')) scanHistoryPage(true);
+        else observeHistoryPage();
+      }, 800);
+    });
+    historyObserver.observe(root,{childList:true,subtree:true});
+    scanHistoryPage(true);
+  }
+
   function addHistorySwitcher() {
     const onHistory = location.pathname.startsWith('/feed/history');
     const existing = document.getElementById('yst2-history-switcher');
@@ -2675,7 +2962,7 @@
     addPlaylistFollowButton();
     addHistorySwitcher();
   }
-  function openPanel(){if(db.settings.enabled===false)activeTab='settings';document.getElementById(PANEL)?.classList.add('open');renderPanel();}
+  function openPanel(){if(db.settings.enabled===false)activeTab='settings';document.getElementById(PANEL)?.classList.add('open');renderPanel();refreshAccountContext().then(()=>{if(syncAllowed())syncYouTubeHistory(false);}).catch(()=>{});}
   function closePanel(){document.getElementById(PANEL)?.classList.remove('open');}
   function togglePanel(){document.getElementById(PANEL)?.classList.contains('open')?closePanel():openPanel();}
   function toast(message) {
@@ -2837,6 +3124,14 @@
       @media(max-width:600px){#${PANEL}{top:8px;right:8px;bottom:8px;width:calc(100vw - 16px);max-height:calc(100dvh - 16px);border-radius:15px}#${PANEL} .yst2-toolbar{padding:10px;flex-wrap:wrap}#${PANEL} .yst2-primary-actions{flex-wrap:wrap}#${PANEL} .yst2-footer{gap:6px;flex-wrap:wrap}}
         `;document.head.appendChild(st);
   }
+  function readSeriesPlaybackSession() {
+    try {
+      const value = JSON.parse(sessionStorage.getItem(SERIES_SESSION_KEY) || 'null');
+      return value && typeof value === 'object' && /^[A-Za-z0-9_-]{11}$/.test(String(value.videoId || '')) ? value : null;
+    } catch (_) { return null; }
+  }
+  function writeSeriesPlaybackSession(value) { try { sessionStorage.setItem(SERIES_SESSION_KEY, JSON.stringify(value)); } catch (_) {} }
+  function clearSeriesPlaybackSession() { activePlaybackSession = null; try { sessionStorage.removeItem(SERIES_SESSION_KEY); } catch (_) {} }
   function trackCurrentVideo() {
     if (db.settings.enabled === false) { if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;} currentVideoId='';activeVideo=null;activePlaybackSession=null;return; }
     const meta=videoMeta(), video=document.querySelector('video');
@@ -2855,36 +3150,70 @@
     const listOrder=listSeries && listSeries.playlistId===list?currentPlaylistIndex():-1;
     const listedOccurrence=listSeries?episodeOccurrence(listSeries,meta.id,listOrder):null;
     const s=listedOccurrence?listSeries:(db.series.find(x=>episodeOccurrence(x,meta.id,x.playlistId===list?listOrder:-1)) || db.series.find(x=>x.bookmarkVideoId===meta.id));
-    const currentOccurrence=s?episodeOccurrence(s,meta.id,s.playlistId===list?listOrder:-1):null;
+    const ownedSession=readSeriesPlaybackSession();
+    const preferredOrder=ownedSession&&s&&ownedSession.seriesId===s.id&&ownedSession.videoId===meta.id?Number(ownedSession.order):(s&&s.playlistId===list?listOrder:-1);
+    const currentOccurrence=s?episodeOccurrence(s,meta.id,preferredOrder):null;
     if(s&&currentOccurrence){
-      activePlaybackSession={seriesId:s.id,videoId:meta.id,order:currentOccurrence.order,catalogRevision:Number(s.catalogRevision)||0};
+      const owned=ownedSession;
+      if(owned&&owned.seriesId===s.id&&owned.videoId===meta.id&&Number(owned.order)===Number(currentOccurrence.order)&&Number(owned.catalogRevision)===Number(s.catalogRevision||0))activePlaybackSession=owned;
+      else if(owned)clearSeriesPlaybackSession();
       s.cursorVideoId=meta.id;
       s.cursorOrder=currentOccurrence.order;
       s.cursorUpdatedAt=Date.now();
     }
-    const savePosition=()=>{
-      if(db.settings.recordPlaybackProgress===false||!s||location.pathname.startsWith('/shorts/'))return;
-      if(!Number.isFinite(video.currentTime)||!Number.isFinite(video.duration)||video.duration<=0||video.duration>604800)return;
-      const dur=video.duration;
-      const old=stateFor(meta.id), threshold=Number(db.settings.watchedThreshold);
-      const watched=old.completionOverride === 'WATCHED' || (old.completionOverride !== 'UNWATCHED' && (old.watched || shouldAutoComplete(video.currentTime,dur,threshold,Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS),video.ended)));
-      setState(meta.id,{title:meta.title||old.title,position:watched?(dur||video.currentTime):video.currentTime,duration:dur||old.duration,watched},false);
-      if(s&&db.settings.recordPlaybackProgress!==false) db.history[meta.id]={title:meta.title,lastSeen:Date.now()};
+    let candidateAt=performance.now();
+    let previousCandidatePosition=Number(video.currentTime)||0;
+    let stableDuration=Number(video.duration)||0;
+    let stableDurationAt=stableDuration>0?performance.now():0;
+    let validPlayback=false;
+    let growingDuration=false;
+    let lastCheckpointAt=0;
+    let lastCheckpointPosition=-1;
+    const checkpoint=async(force=false,ended=false)=>{
+      const expectedGeneration=privacyGeneration;
+      await refreshAccountContext();
+      if(expectedGeneration!==privacyGeneration||!recordingAllowed()||!s||location.pathname.startsWith('/shorts/'))return;
+      const now=performance.now();
+      const position=Number(video.currentTime), duration=Number(video.duration);
+      if(!Number.isFinite(position)||position<0||!Number.isFinite(duration)||duration<=0||duration>604800)return;
+      if(stableDuration>0&&Math.abs(duration-stableDuration)>1)growingDuration=true;
+      if(duration!==stableDuration){stableDuration=duration;stableDurationAt=now;}
+      if(!validPlayback){
+        const advancing=position>previousCandidatePosition;
+        previousCandidatePosition=position;
+        if(now-candidateAt<500||!advancing)return;
+        validPlayback=true;
+      }
+      if(growingDuration||now-stableDurationAt<3000)return;
+      if(!force&&now-lastCheckpointAt<SAVE_MS)return;
+      if(position===lastCheckpointPosition&&!ended)return;
+      const old=stateFor(meta.id);
+      const threshold=Number(db.settings.watchedThreshold);
+      const watched=old.completionOverride==='WATCHED'||(old.completionOverride!=='UNWATCHED'&&(old.watched||shouldAutoComplete(position,duration,threshold,Number(db.settings.watchedRemainingSeconds??AUTO_WATCHED_REMAINING_SECONDS),ended||video.ended)));
+      setState(meta.id,{title:meta.title||old.title,position:watched?duration:position,duration,watched},false);
+      db.history[meta.id]={title:meta.title,lastSeen:Date.now()};
       saveDB();
+      lastCheckpointAt=now;
+      lastCheckpointPosition=position;
+      lastSave=Date.now();
       if(document.getElementById(PANEL)?.classList.contains('open')&&Date.now()-lastPanelRender>1800){lastPanelRender=Date.now();renderPanel();}
     };
-    const onTime=()=>{if(Date.now()-lastSave>=SAVE_MS){lastSave=Date.now();savePosition();}};
+    const onPlaying=()=>{
+      if(!validPlayback){candidateAt=performance.now();previousCandidatePosition=Number(video.currentTime)||0;}
+    };
+    const onTime=()=>{if(Date.now()-lastSave>=SAVE_MS)checkpoint(false,false);};
+    const onPause=()=>checkpoint(true,false);
+    const onVisibility=()=>{if(document.visibilityState==='hidden')checkpoint(true,false);};
+    const onPageHide=()=>checkpoint(true,false);
+    video.addEventListener('playing',onPlaying);
     video.addEventListener('timeupdate',onTime);
-    video.addEventListener('loadedmetadata',savePosition,{once:true});
-    video.addEventListener('pause',savePosition);
+    video.addEventListener('loadedmetadata',()=>{stableDuration=Number(video.duration)||0;stableDurationAt=performance.now();},{once:true});
+    video.addEventListener('pause',onPause);
+    document.addEventListener('visibilitychange',onVisibility);
+    window.addEventListener('pagehide',onPageHide);
     const onEnded=()=>{
-      const previous=stateFor(meta.id);
-      if(db.settings.recordPlaybackProgress!==false&&s&&previous.completionOverride!=='UNWATCHED'){
-        setState(meta.id,{title:meta.title,position:video.duration||meta.duration,duration:video.duration||meta.duration,watched:true},false);
-      }
-      if(s) db.history[meta.id]={title:meta.title,lastSeen:Date.now()};
-      saveDB();
-      if(db.settings.autoNext && s && isWatched(meta.id)) {
+      checkpoint(true,true);
+      if(db.settings.autoNext && s) {
         const next=chooseNext(s,meta.id,currentOccurrence&&currentOccurrence.order);
         if(next && next.id!==meta.id) {
           toast(`Playing next episode: ${next.title}`);
@@ -2895,24 +3224,56 @@
     };
     video.addEventListener('ended',onEnded);
     activeVideoCleanup=()=>{
+      video.removeEventListener('playing',onPlaying);
       video.removeEventListener('timeupdate',onTime);
-      video.removeEventListener('loadedmetadata',savePosition);
-      video.removeEventListener('pause',savePosition);
+      video.removeEventListener('pause',onPause);
+      document.removeEventListener('visibilitychange',onVisibility);
+      window.removeEventListener('pagehide',onPageHide);
       video.removeEventListener('ended',onEnded);
     };
-    if(s&&db.settings.recordPlaybackProgress!==false){db.history[meta.id]={title:meta.title,lastSeen:Date.now()};saveDB();}
+    if(s&&recordingAllowed())checkpoint(true,false);
   }
+
+  function handleOwnedSeriesRouteChange(nextVideoId) {
+    const owned = activePlaybackSession || readSeriesPlaybackSession();
+    if (!owned || !nextVideoId) return false;
+    const series = findSeries(owned.seriesId);
+    if (!series) { clearSeriesPlaybackSession(); return false; }
+    const incomingOccurrence = episodeOccurrence(series, nextVideoId, series.playlistId === getPlaylistId() ? currentPlaylistIndex() : -1);
+    if (nextVideoId === owned.videoId && incomingOccurrence?.order === Number(owned.order)) return false;
+    const episodes = orderedEpisodes(series).filter(ep => ep.available !== false && !ep.unavailable && /^[A-Za-z0-9_-]{11}$/.test(ep.id));
+    const currentIndex = episodes.findIndex(ep => ep.id === owned.videoId && ep.order === Number(owned.order));
+    const previous = currentIndex > 0 ? episodes[currentIndex - 1] : null;
+    const expected = currentIndex >= 0 ? episodes[currentIndex + 1] : null;
+    if (previous && nextVideoId === previous.id && incomingOccurrence?.order === previous.order) {
+      activePlaybackSession = { seriesId: series.id, videoId: previous.id, order: previous.order, catalogRevision: Number(series.catalogRevision) || 0 };
+      writeSeriesPlaybackSession(activePlaybackSession);
+      return false;
+    }
+    if (!expected) { clearSeriesPlaybackSession(); return false; }
+    if (nextVideoId === expected.id && incomingOccurrence?.order === expected.order) {
+      activePlaybackSession = { seriesId: series.id, videoId: expected.id, order: expected.order, catalogRevision: Number(series.catalogRevision) || 0 };
+      writeSeriesPlaybackSession(activePlaybackSession);
+      return false;
+    }
+    toast('Keeping playback in the followed series.');
+    openEpisode(series, expected, true);
+    return true;
+  }
+
   function routeChanged() {
     clearTimeout(routeTimer);
     routeTimer=setTimeout(()=>{
       ensureUI();
+      if (handleOwnedSeriesRouteChange(getVideoId())) return;
       currentVideoId='';activeVideo=null;
       trackCurrentVideo();
       if(db.settings.autoSyncOnOpen && getPlaylistId() && !syncBusy) {
         const id=getPlaylistId(), s=findSeries(id), last=Number(sessionStorage.getItem(AUTO_SYNC_KEY)||0);
         if(s && Date.now()-last>15*60*1000){sessionStorage.setItem(AUTO_SYNC_KEY,String(Date.now()));syncCurrentPlaylist();}
       }
-      if(location.pathname.startsWith('/feed/history')&&db.settings.historyScan) scanHistoryPage();
+      observeHistoryPage();
+      if(location.pathname.startsWith('/feed/history')&&syncAllowed())syncYouTubeHistory(false);
       if(staleRefreshTimer)clearTimeout(staleRefreshTimer);
       staleRefreshTimer=setTimeout(refreshStaleSeries,1200);
     },450);
@@ -2923,17 +3284,49 @@
       addPlayerButton();
       addPlaylistFollowButton();
       addHistorySwitcher();
+      if (location.pathname.startsWith('/feed/history')) observeHistoryPage();
     });
     mo.observe(document.documentElement,{childList:true,subtree:true});
   }
+
+  function installNativeSeriesNavigation() {
+    if (document.documentElement.dataset.yst2NativeNavigation === '1') return;
+    document.documentElement.dataset.yst2NativeNavigation = '1';
+    document.addEventListener('click', event => {
+      const target = event.target && event.target.closest && event.target.closest('#movie_player .ytp-next-button, #movie_player .ytp-prev-button, #movie_player .ytp-autonav-endscreen-upnext-container, #movie_player .ytp-autonav-endscreen-upnext-button');
+      if (target && activePlaybackSession) {
+        const direction = target.matches('.ytp-prev-button') ? -1 : 1;
+        if (navigateSeries(direction, true)) {
+          event.preventDefault();
+          event.stopPropagation();
+          event.stopImmediatePropagation();
+        }
+        return;
+      }
+      if (!activePlaybackSession) return;
+      const link = event.target && event.target.closest && event.target.closest('a[href]');
+      if (!link || link.closest('#' + PANEL) || link.closest('#' + PLAYER_BTN) || link.closest('#' + PLAYLIST_BTN)) return;
+      try {
+        const next = new URL(link.href, location.origin);
+        const nextId = next.pathname === '/watch' ? next.searchParams.get('v') : '';
+        if (nextId && nextId !== activePlaybackSession.videoId) clearSeriesPlaybackSession();
+      } catch (_) {}
+    }, true);
+  }
+
   function boot() {
-    ensureUI();routeChanged();
+    ensureUI();
+    installNativeSeriesNavigation();
+    refreshAccountContext().then(()=>{if(location.pathname.startsWith('/feed/history')&&syncAllowed())syncYouTubeHistory(false);}).catch(()=>{});
+    routeChanged();
     document.addEventListener('yt-navigate-finish',routeChanged);
-    window.addEventListener('popstate',routeChanged);
+    window.addEventListener('popstate',()=>{clearSeriesPlaybackSession();routeChanged();});
     observeSidebar();
     // YouTube may replace its video element without firing SPA navigation.
     if(tickTimer)clearInterval(tickTimer);
     tickTimer=setInterval(()=>{
+      refreshAccountContext().catch(()=>{});
+      if(syncAllowed()&&document.getElementById(PANEL)?.classList.contains('open')&&Date.now()-historySyncLastAt>=30*1000)syncYouTubeHistory(false);
       if(getVideoId() && (getVideoId()!==currentVideoId || document.querySelector('video')!==activeVideo))trackCurrentVideo();
       if(db.settings.showSidebarButton!==false&&!document.getElementById(BTN)) addSidebarButton();
       addPlayerButton();

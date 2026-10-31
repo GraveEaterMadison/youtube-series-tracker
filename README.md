@@ -4,9 +4,9 @@
 
 **Install:** [YouTube Series Tracker on Greasy Fork](https://greasyfork.org/en/scripts/601970-youtube-series-tracker) · [Raw userscript source](https://raw.githubusercontent.com/GraveEaterMadison/youtube-series-tracker/feature/morphe-style-auto-follow/youtube-series-tracker.user.js)
 
-A local-first Firefox userscript for tracking YouTube playlists as series: episode progress, a series library, continue-watching, history matching, and backup/restore.
+A local-first Firefox userscript for tracking YouTube playlists as series: episode progress, a series library, continue-watching, History matching, and backup/restore. This is an independent browser adaptation of concepts and behaviour from [thryyy/morphe-series-tracker](https://github.com/thryyy/morphe-series-tracker), which is based on [Morphe Patches](https://github.com/MorpheApp/morphe-patches).
 
-> **Project status: beta.** YouTube's internal page structures can change without notice.
+> **Project status: beta.** YouTube's internal page structures can change without notice. This modified version is distributed under GPL-3.0-only; see [LICENSE](LICENSE) and the required [NOTICE](NOTICE).
 
 ## Features
 
@@ -29,13 +29,15 @@ A local-first Firefox userscript for tracking YouTube playlists as series: episo
 - Player Previous/Next controls, Follow series on playlist pages, and Follow by pasted playlist URL or ID with a guided start point.
 - Catalog revisions, new-episode badges, six-hour stale refresh, retry backoff, and cursor recovery when playlists change.
 - Deterministic Continue watching states, including a recovery chooser when the saved episode is missing or ambiguous.
-- Optional local playback recording and visible History progress-bar completion import (no account identifiers or remote sync).
+- Local playback recording is off by default and requires explicit consent bound to the active signed-in YouTube account; account changes invalidate pending writes.
+- Optional YouTube History sync reads only followed-video progress through YouTube's same-origin browse endpoint, stores account-scoped salted digests/baselines locally, preserves manual overrides, and never invents a seek position from a percentage bar.
+- Separate visible History-page scanning automatically rescans newly loaded rows as you scroll.
 - Versioned, validated backup merge with a preview, legacy backup compatibility, Morphe-native import/export, and short-lived Undo for cleanup.
 - Optional auto-next navigation.
 - Refresh playlists and use per-episode actions for restart, resume, manual completion overrides, Start here, and mark watched through.
 - View continue-watching and matching entries from YouTube history.
 - Export and import a backup of tracker data.
-- Store tracker data locally, without a project backend or telemetry.
+- Store tracker data locally, without a project backend or telemetry. Optional History sync communicates only with YouTube using the current signed-in browser session.
 
 ## Install in Firefox
 
