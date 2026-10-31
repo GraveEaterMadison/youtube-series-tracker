@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/GraveEaterMadison/youtube-series-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/GraveEaterMadison/youtube-series-tracker/actions/workflows/ci.yml)
 
-**Install:** [YouTube Series Tracker on Greasy Fork](https://greasyfork.org/en/scripts/601970-youtube-series-tracker) · [Raw userscript source](https://raw.githubusercontent.com/GraveEaterMadison/youtube-series-tracker/main/youtube-series-tracker.user.js)
+**Install:** [YouTube Series Tracker on Greasy Fork](https://greasyfork.org/en/scripts/601970-youtube-series-tracker) · [Raw userscript source](https://raw.githubusercontent.com/GraveEaterMadison/youtube-series-tracker/feature/morphe-style-auto-follow/youtube-series-tracker.user.js)
 
 A local-first Firefox userscript for tracking YouTube playlists as series: episode progress, a series library, continue-watching, history matching, and backup/restore.
 
@@ -25,8 +25,14 @@ A local-first Firefox userscript for tracking YouTube playlists as series: episo
 - Configure watch-percentage and remaining-time completion thresholds (default 92% or 30 seconds remaining).
 - Manually override watched status, mark watched through an episode, mark all playable episodes watched, and undo the last progress action.
 - Hide watched episodes per series, choose a **Start here** episode for Continue watching, and show or hide the Series entry in YouTube navigation.
+- Guided Follow setup offers playlist or reverse order and can optionally mark earlier episodes watched.
+- Player Previous/Next controls, Follow series on playlist pages, and Follow by pasted playlist URL or ID with a guided start point.
+- Catalog revisions, new-episode badges, six-hour stale refresh, retry backoff, and cursor recovery when playlists change.
+- Deterministic Continue watching states, including a recovery chooser when the saved episode is missing or ambiguous.
+- Optional local playback recording and visible History progress-bar completion import (no account identifiers or remote sync).
+- Versioned, validated backup merge with a preview, legacy backup compatibility, Morphe-native import/export, and short-lived Undo for cleanup.
 - Optional auto-next navigation.
-- Refresh playlists and manually toggle watched status.
+- Refresh playlists and use per-episode actions for restart, resume, manual completion overrides, Start here, and mark watched through.
 - View continue-watching and matching entries from YouTube history.
 - Export and import a backup of tracker data.
 - Store tracker data locally, without a project backend or telemetry.
@@ -34,11 +40,11 @@ A local-first Firefox userscript for tracking YouTube playlists as series: episo
 ## Install in Firefox
 
 1. Install [Violentmonkey](https://violentmonkey.github.io/) or another compatible userscript manager.
-2. Open the [userscript source](https://raw.githubusercontent.com/GraveEaterMadison/youtube-series-tracker/main/youtube-series-tracker.user.js).
+2. Open the [userscript source](https://raw.githubusercontent.com/GraveEaterMadison/youtube-series-tracker/feature/morphe-style-auto-follow/youtube-series-tracker.user.js).
 3. Create a new userscript in your manager, paste the source, and save it. If your manager offers to install the raw script directly, review the permissions and confirm.
 4. Reload YouTube. Open a playlist or video and look for the **Series** button/panel.
 
-The script currently declares only @grant none and matches https://www.youtube.com/*. Review the source before installing any userscript.
+The script declares only @grant none and matches https://www.youtube.com/*. Data remains in YouTube localStorage. It can read and write Morphe-compatible library backups, but it does not share account-bound progress, Android identity, native History endpoints, or SQLite with the Morphe app. Review the source before installing.
 
 ## How it stores data
 
@@ -48,8 +54,8 @@ Tracker data is stored in the browser's localStorage for YouTube. It is not sync
 
 - YouTube's page data and internal endpoints are not stable public APIs; playlist extraction can break after site updates.
 - History matching depends on history entries currently rendered by YouTube. Scroll to load more entries and rescan if needed.
-- Completion overrides, mark-through, auto-next, and playback progress still need manual Firefox testing.
-- Automated tests validate syntax, metadata, and basic source invariants; they are not browser end-to-end tests.
+- The YouTube History progress-bar selector and playlist/player toolbar placements still need live Firefox testing because YouTube can change its page structure.
+- Automated tests exercise the planner, refresh policy, completion rules, backup validation, and source wiring; they are not browser end-to-end tests.
 - No live Firefox/YouTube end-to-end test is claimed by this repository's CI.
 
 ## Development

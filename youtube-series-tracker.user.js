@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube Series Tracker
 // @namespace    https://github.com/GraveEaterMadison/youtube-series-tracker
-// @version      2.5.1
-// @description  Build YouTube series from playlists or add individual videos, with automatic default series names, local progress, watched status, history matching, and optional auto-next.
+// @version      2.7.0
+// @description  Follow YouTube playlists as series with guided setup, local progress, resume planning, History matching, and validated backup/restore.
 // @author       Zero
 // @license      MIT
 // @homepageURL  https://github.com/GraveEaterMadison/youtube-series-tracker
@@ -25,7 +25,18 @@
   const AUTO_WATCHED_DEFAULT = 0.92;
   const AUTO_WATCHED_REMAINING_SECONDS = 30;
   let lastUndo = null;
-  const SAVE_MS = 2000;
+  const SAVE_MS = 5000;
+  const UNDO_WINDOW_MS = 8000;
+  const MAX_BACKUP_CHARS = 8 * 1024 * 1024;
+  const MAX_BACKUP_SERIES = 500;
+  const MAX_BACKUP_EPISODES = 50000;
+  const PLAYER_PREV_BTN = 'yst2-player-previous';
+  const PLAYER_NEXT_BTN = 'yst2-player-next';
+  const PLAYLIST_BTN = 'yst2-playlist-action';
+  let undoExpiryTimer = null;
+  let activePlaybackSession = null;
+  let staleRefreshBusy = false;
+  let staleRefreshTimer = null;
   const AUTO_SYNC_KEY = 'yst2-last-sync';
   let db = loadDB();
   let activeTab = 'library';
@@ -47,12 +58,17 @@
     return {
       version: VERSION,
       settings: {
+        enabled: true,
         watchedThreshold: AUTO_WATCHED_DEFAULT,
         watchedRemainingSeconds: AUTO_WATCHED_REMAINING_SECONDS,
         autoNext: false,
         autoSyncOnOpen: true,
         showSidebarButton: true,
-        historyScan: true
+        historyScan: true,
+        catalogAutoRefresh: true,
+        recordPlaybackProgress: false,
+        importHistoryProgress: false,
+        showPlayerButton: true
       },
       series: [],
       episodes: {},
@@ -71,10 +87,25 @@
       }
       const p = raw ? JSON.parse(raw) : {};
       const base = emptyDB();
+      const series = (Array.isArray(p.series) ? p.series : []).map(item => ({
+        ...item,
+        catalogRevision: Number.isInteger(item.catalogRevision) ? item.catalogRevision : (Array.isArray(item.episodes) && item.episodes.length ? 1 : 0),
+        cursorRevision: Number.isInteger(item.cursorRevision) ? item.cursorRevision : 0,
+        newEpisodeIds: Array.isArray(item.newEpisodeIds) ? item.newEpisodeIds.filter(id => /^[A-Za-z0-9_-]{11}$/.test(id)) : [],
+        startHereVideoId: /^[A-Za-z0-9_-]{11}$/.test(String(item.startHereVideoId || '')) ? item.startHereVideoId : '',
+        bookmarkVideoId: /^[A-Za-z0-9_-]{11}$/.test(String(item.bookmarkVideoId || '')) ? item.bookmarkVideoId : '',
+        bookmarkVideoId: /^[A-Za-z0-9_-]{11}$/.test(String(item.bookmarkVideoId || '')) ? item.bookmarkVideoId : '',
+        startHereOrder: Number.isInteger(item.startHereOrder) ? item.startHereOrder : -1,
+        lastRefreshAttemptAt: Number(item.lastRefreshAttemptAt) || 0,
+        refreshRetryAt: Number(item.refreshRetryAt) || 0,
+        refreshError: String(item.refreshError || '').slice(0, 240),
+        recoveryRequired: Boolean(item.recoveryRequired),
+        recoveryVideoId: /^[A-Za-z0-9_-]{11}$/.test(String(item.recoveryVideoId || '')) ? item.recoveryVideoId : ''
+      }));
       return {
         ...base, ...p,
         settings: { ...base.settings, ...(p.settings || {}) },
-        series: Array.isArray(p.series) ? p.series : [],
+        series,
         episodes: p.episodes && typeof p.episodes === 'object' ? p.episodes : {},
         history: p.history && typeof p.history === 'object' ? p.history : {}
       };
@@ -148,18 +179,57 @@
     return (position / duration >= fraction && duration - position <= 90) ||
       (duration > 60 && remainingSeconds > 0 && duration - position <= remainingSeconds);
   }
+  function expireUndo(reference) {
+    if (undoExpiryTimer) clearTimeout(undoExpiryTimer);
+    undoExpiryTimer = setTimeout(() => {
+      if (lastUndo === reference) {
+        lastUndo = null;
+        undoExpiryTimer = null;
+        if (document.getElementById(PANEL)?.classList.contains('open')) renderPanel();
+      }
+    }, UNDO_WINDOW_MS + 10);
+  }
+  function shouldAutoCompletePercentage(observedPercent, duration, threshold = db.settings.watchedThreshold) {
+    if (!Number.isFinite(observedPercent) || observedPercent < Number(threshold) * 100 || observedPercent > 100 || !Number.isFinite(duration) || duration <= 0) return false;
+    return duration * (100 - observedPercent) / 100 <= 90;
+  }
   function rememberUndo(ids, description) {
     const before = {};
     for (const id of new Set(ids)) before[id] = Object.prototype.hasOwnProperty.call(db.episodes, id) ? { ...db.episodes[id] } : null;
-    lastUndo = { before, description };
+    lastUndo = { before, description, expiresAt: Date.now() + UNDO_WINDOW_MS };
+    expireUndo(lastUndo);
+  }
+  function rememberDatabaseUndo(description) {
+    lastUndo = {
+      database: {
+        series: JSON.parse(JSON.stringify(db.series)),
+        episodes: JSON.parse(JSON.stringify(db.episodes)),
+        history: JSON.parse(JSON.stringify(db.history))
+      },
+      description,
+      expiresAt: Date.now() + UNDO_WINDOW_MS
+    };
+    expireUndo(lastUndo);
   }
   function undoLastChange() {
-    if (!lastUndo) return false;
-    for (const [id, old] of Object.entries(lastUndo.before)) {
+    if (!lastUndo || Date.now() > Number(lastUndo.expiresAt || 0)) {
+      lastUndo = null;
+      if (undoExpiryTimer) clearTimeout(undoExpiryTimer);
+      undoExpiryTimer = null;
+      return false;
+    }
+    if (lastUndo.database) {
+      db.series = JSON.parse(JSON.stringify(lastUndo.database.series));
+      db.episodes = JSON.parse(JSON.stringify(lastUndo.database.episodes));
+      db.history = JSON.parse(JSON.stringify(lastUndo.database.history));
+    }
+    for (const [id, old] of Object.entries(lastUndo.before || {})) {
       if (old === null) delete db.episodes[id];
       else db.episodes[id] = { ...old };
     }
     const description = lastUndo.description;
+    if (undoExpiryTimer) clearTimeout(undoExpiryTimer);
+    undoExpiryTimer = null;
     lastUndo = null;
     saveDB();
     renderPanel();
@@ -192,7 +262,7 @@
   function setState(id, patch, persist = true) {
     const old = stateFor(id);
     const next = { ...old, ...patch, updatedAt: Date.now() };
-    if (patch.watched === true && !old.watched) next.lastWatchedAt = Date.now();
+    if (patch.watched === true && !isWatched(id)) next.lastWatchedAt = Date.now();
     db.episodes[id] = next;
     if (persist) saveDB();
   }
@@ -229,6 +299,18 @@
     return /^[A-Za-z0-9_-]{2,200}$/.test(value) && !/^(?:RD|UL)/.test(value) && value !== 'WL' && value !== 'LL';
   }
 
+  function parsePlaylistInput(input) {
+    const value = String(input || '').trim();
+    if (!value) return '';
+    let id = value;
+    try {
+      if (/^https?:\/\//i.test(value)) {
+        const url = new URL(value);
+        id = url.searchParams.get('list') || '';
+      }
+    } catch (_) { return ''; }
+    return isSuggestiblePlaylistId(id) ? id : '';
+  }
   function isDiscoveryPlaylistId(id) {
     return isSuggestiblePlaylistId(id) && !/^(?:UU|UUL)/.test(id);
   }
@@ -937,13 +1019,25 @@
       series = { id: listId, playlistId: listId, title: title || 'YouTube playlist', episodes: [], addedAt: Date.now(), updatedAt: Date.now() };
       db.series.unshift(series);
     }
-    const old = new Map(series.episodes.map((e, i) => [e.id, { ...e, order: Number.isFinite(e.order) ? e.order : i }]));
+    const previousCatalog = Array.isArray(series.episodes) ? series.episodes : [];
+    const previousIds = new Set(previousCatalog.filter(ep => ep.available !== false && !ep.unavailable).map(ep => ep.id));
+    const newIds = new Set(Array.isArray(series.newEpisodeIds) ? series.newEpisodeIds : []);
+    const oldByOccurrence = new Map();
+    previousCatalog.forEach((ep,index) => {
+      const order = Number.isInteger(ep.order) ? ep.order : index;
+      oldByOccurrence.set(ep.id + ':' + order, { ...ep, order });
+    });
+    const usedOld = new Set();
     const merged = [];
     items.forEach((ep, i) => {
-      const prev = old.get(ep.id);
       const order = Number.isInteger(ep.order) && ep.order >= 0 ? ep.order : i;
+      const occurrenceKey = ep.id + ':' + order;
+      const prev = oldByOccurrence.get(occurrenceKey) || previousCatalog.find((oldEp,index) => !usedOld.has(index) && oldEp.id === ep.id);
+      const prevIndex = prev ? previousCatalog.indexOf(prev) : -1;
+      if (prevIndex >= 0) usedOld.add(prevIndex);
       const next = { ...prev, ...ep, order, unavailable: Boolean(ep.unavailable || ep.available === false) };
       merged.push(next);
+      if (previousCatalog.length && !next.unavailable && !previousIds.has(next.id)) newIds.add(next.id);
       if (!next.unavailable && /^[A-Za-z0-9_-]{11}$/.test(ep.id)) {
         const st = stateFor(ep.id);
         setState(ep.id, { title: ep.title || st.title, duration: ep.duration || st.duration }, false);
@@ -951,22 +1045,95 @@
     });
     // Keep previously-known items that may be unavailable/removed, after the verified catalog.
     let tailOrder = merged.reduce((max, ep) => Math.max(max, Number.isInteger(ep.order) ? ep.order : -1), -1) + 1;
-    for (const [id, ep] of old) {
-      if (merged.some(x => x.id === id)) continue;
+    previousCatalog.forEach((ep,index) => {
+      if (usedOld.has(index)) return;
+      if (merged.some(item => item.id === ep.id && item.order === ep.order)) return;
       merged.push({ ...ep, order: tailOrder++, unavailable: ep.manuallyAdded ? false : true });
-    }
+    });
     series.title = title || series.title;
     if (typeof series.playbackReverse !== 'boolean') series.playbackReverse = inferReverseOrder(merged);
     series.episodes = merged;
+    series.catalogRevision = (Number(series.catalogRevision) || 0) + 1;
+    series.newEpisodeIds = [...newIds].filter(id => merged.some(ep => ep.id === id && ep.available !== false && !ep.unavailable));
+    if (series.cursorVideoId) {
+      const matches = merged.filter(ep => ep.id === series.cursorVideoId && ep.available !== false && !ep.unavailable);
+      const exact = matches.find(ep => ep.order === series.cursorOrder);
+      if (exact) {
+        series.cursorRevision = series.catalogRevision;
+        series.recoveryRequired = false;
+        series.recoveryVideoId = '';
+      } else if (matches.length === 1) {
+        series.cursorOrder = matches[0].order;
+        series.cursorRevision = series.catalogRevision;
+        series.recoveryRequired = false;
+        series.recoveryVideoId = '';
+      } else {
+        series.recoveryRequired = true;
+        series.recoveryVideoId = series.cursorVideoId;
+      }
+    }
+    if (series.startHereVideoId && !merged.some(ep => ep.id === series.startHereVideoId && ep.available !== false && !ep.unavailable)) {
+      series.startHereVideoId = '';
+      series.startHereOrder = -1;
+    }
     series.updatedAt = Date.now();
     series.lastSyncedAt = Date.now();
+    series.lastRefreshAttemptAt = Date.now();
+    series.refreshRetryAt = 0;
+    series.refreshError = '';
     db.lastSync = Date.now();
     saveDB();
     return series;
   }
+  async function refreshSeries(seriesId, quiet = false) {
+    const series = findSeries(seriesId);
+    if (!series || !series.playlistId || syncBusy) return false;
+    syncBusy = true;
+    series.lastRefreshAttemptAt = Date.now();
+    saveDB();
+    if (!quiet) toast('Refreshing “' + series.title + '”…');
+    try {
+      const catalog = await fetchFullPlaylist(series.playlistId);
+      const latest = findSeries(seriesId);
+      if (!latest) return false;
+      const merged = mergeSeries(seriesId, catalog.title || latest.title, catalog.items);
+      merged.refreshRetryAt = 0;
+      merged.refreshError = '';
+      saveDB();
+      renderPanel();
+      if (!quiet) toast('Refreshed “' + merged.title + '” · ' + merged.episodes.length + ' episodes.');
+      return true;
+    } catch (error) {
+      const latest = findSeries(seriesId);
+      if (latest) {
+        latest.refreshRetryAt = Date.now() + 30 * 60 * 1000;
+        latest.refreshError = String(error?.message || 'Catalog refresh failed').slice(0, 240);
+        saveDB();
+      }
+      if (!quiet) toast((error?.message || 'Could not refresh playlist.') + ' The saved catalog was kept.');
+      return false;
+    } finally {
+      syncBusy = false;
+    }
+  }
+  async function refreshStaleSeries() {
+    if (db.settings.enabled === false || !db.settings.catalogAutoRefresh || staleRefreshBusy || syncBusy) return;
+    staleRefreshBusy = true;
+    try {
+      const due = db.series.filter(series => catalogRefreshDue(series)).slice(0, 2);
+      for (const series of due) {
+        if (syncBusy) break;
+        await refreshSeries(series.id, true);
+      }
+    } finally {
+      staleRefreshBusy = false;
+    }
+  }
   async function syncCurrentPlaylist() {
     const id = getPlaylistId();
     if (!id) { toast('Open a YouTube playlist first.'); return; }
+    const existing = findSeries(id);
+    if (existing) { await refreshSeries(id,false); return; }
     if (syncBusy) return;
     syncBusy = true; toast('Syncing the full playlist…');
     try {
@@ -994,6 +1161,7 @@
       playable: playable.length,
       watched,
       active,
+      newCount: Array.isArray(s.newEpisodeIds) ? s.newEpisodeIds.length : 0,
       pct: playable.length ? Math.round(watched / playable.length * 100) : 0,
       left
     };
@@ -1024,9 +1192,82 @@
     }
     return episodes[0] || null;
   }
+  function catalogRefreshDue(series, now = Date.now()) {
+    if (!series?.playlistId) return false;
+    const fetchedAt = Number(series.lastSyncedAt) || 0;
+    const attemptedAt = Number(series.lastRefreshAttemptAt) || 0;
+    const retryAt = Number(series.refreshRetryAt) || 0;
+    return now >= retryAt
+      && (!attemptedAt || now - attemptedAt >= 30 * 60 * 1000)
+      && (!fetchedAt || now < fetchedAt || now - fetchedAt >= 6 * 60 * 60 * 1000);
+  }
+  function resumePlan(series) {
+    const episodes = orderedEpisodes(series).filter(ep =>
+      ep.available !== false && !ep.unavailable && /^[A-Za-z0-9_-]{11}$/.test(ep.id));
+    if (!episodes.length && /^[A-Za-z0-9_-]{11}$/.test(String(series.bookmarkVideoId || ''))) {
+      const bookmark = stateFor(series.bookmarkVideoId);
+      return { kind: 'RESUME', episode: { id: series.bookmarkVideoId, title: bookmark.title || 'Saved video', order: -1, duration: bookmark.duration || 0, available: true }, position: isWatched(series.bookmarkVideoId) ? 0 : bookmark.position || 0 };
+    }
+    if (!episodes.length) return { kind: 'NO_PLAYABLE', episode: null, position: 0 };
+    const startHere = series.startHereVideoId
+      ? episodes.find(ep => ep.id === series.startHereVideoId && (!Number.isInteger(series.startHereOrder) || ep.order === series.startHereOrder))
+      : null;
+    if (startHere) return { kind: 'RESUME', episode: startHere, position: 0 };
+    if (series.cursorVideoId) {
+      const matches = episodes.filter(ep => ep.id === series.cursorVideoId);
+      const exact = matches.find(ep => ep.order === series.cursorOrder);
+      const sameRevision = Number(series.cursorRevision || 0) === Number(series.catalogRevision || 0);
+      if (exact) {
+        if (!sameRevision) {
+          series.cursorRevision = Number(series.catalogRevision) || 0;
+          series.recoveryRequired = false;
+          series.recoveryVideoId = '';
+          saveDB();
+        }
+        if (!isWatched(exact.id)) return { kind: 'RESUME', episode: exact, position: stateFor(exact.id).position || 0 };
+        const cursorIndex = episodes.findIndex(ep => ep.id === exact.id && ep.order === exact.order);
+        const next = episodes.slice(cursorIndex + 1).find(ep => !isWatched(ep.id));
+        return next ? { kind: 'NEXT', episode: next, position: stateFor(next.id).position || 0 }
+          : { kind: 'CAUGHT_UP', episode: null, position: 0 };
+      }
+      if (matches.length === 1) {
+        series.cursorOrder = matches[0].order;
+        series.cursorRevision = Number(series.catalogRevision) || 0;
+        series.recoveryRequired = false;
+        series.recoveryVideoId = '';
+        saveDB();
+        if (!isWatched(matches[0].id)) return { kind: 'RESUME', episode: matches[0], position: stateFor(matches[0].id).position || 0 };
+      } else {
+        series.recoveryRequired = true;
+        series.recoveryVideoId = series.cursorVideoId;
+        return { kind: 'CHOOSE', episode: null, position: 0 };
+      }
+    }
+    const occurrences = new Map();
+    for (const ep of episodes) occurrences.set(ep.id, (occurrences.get(ep.id) || 0) + 1);
+    const recent = episodes
+      .filter(ep => !isWatched(ep.id) && stateFor(ep.id).position > 5 && occurrences.get(ep.id) === 1)
+      .sort((a,b) => (stateFor(b.id).updatedAt || 0) - (stateFor(a.id).updatedAt || 0))[0];
+    if (recent) return { kind: 'RESUME', episode: recent, position: stateFor(recent.id).position || 0 };
+    const first = episodes.find(ep => !isWatched(ep.id));
+    return first ? { kind: 'RESUME', episode: first, position: stateFor(first.id).position || 0 }
+      : { kind: 'CAUGHT_UP', episode: null, position: 0 };
+  }
+  function acknowledgeNewEpisodes(seriesId) {
+    const series = findSeries(seriesId);
+    if (!series || !series.newEpisodeIds?.length) return false;
+    series.newEpisodeIds = [];
+    saveDB();
+    renderPanel();
+    return true;
+  }
   function chooseContinue(s) {
     const eps = orderedEpisodes(s).filter(e =>
       e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
+    if (!eps.length && /^[A-Za-z0-9_-]{11}$/.test(String(s?.bookmarkVideoId || ''))) {
+      const bookmark = stateFor(s.bookmarkVideoId);
+      return { id: s.bookmarkVideoId, title: bookmark.title || 'Saved video', order: -1, duration: bookmark.duration || 0, available: true };
+    }
     const startHere = s && s.startHereVideoId
       ? eps.find(e => e.id === s.startHereVideoId && (!Number.isInteger(s.startHereOrder) || e.order === s.startHereOrder))
       : null;
@@ -1053,6 +1294,25 @@
     if (idx >= 0) return eps.slice(idx + 1).find(e => !isWatched(e.id)) || null;
     return chooseContinue(s);
   }
+  function navigateSeries(direction) {
+    const videoId=getVideoId(), listId=getPlaylistId();
+    let series=activePlaybackSession?findSeries(activePlaybackSession.seriesId):null;
+    if(!series||!series.episodes.some(ep=>ep.id===videoId)){
+      const candidates=db.series.filter(item=>episodeOccurrence(item,videoId,item.playlistId===listId?currentPlaylistIndex():-1));
+      series=candidates.length===1?candidates[0]:null;
+    }
+    if(!series){toast('This video is not in a followed series.');return false;}
+    const requestedOrder=series.playlistId===listId?currentPlaylistIndex():-1;
+    const occurrence=episodeOccurrence(series,videoId,requestedOrder);
+    if(!occurrence){toast('Could not identify this episode occurrence.');return false;}
+    const episodes=orderedEpisodes(series).filter(ep=>ep.available!==false&&!ep.unavailable&&/^[A-Za-z0-9_-]{11}$/.test(ep.id));
+    const index=episodes.findIndex(ep=>ep.id===videoId&&ep.order===occurrence.order);
+    const target=episodes[index+direction];
+    if(!target){toast(direction<0?'This is the first episode.':'This is the last episode.');return false;}
+    openEpisode(series,target,true);
+    return true;
+  }
+
   function openEpisode(s, e, resume = true) {
     if (!s || !e || e.unavailable || e.available === false || !/^[A-Za-z0-9_-]{11}$/.test(e.id)) return;
     const st = stateFor(e.id);
@@ -1061,16 +1321,20 @@
     s.cursorVideoId = e.id;
     s.cursorOrder = Number.isInteger(e.order) ? e.order : undefined;
     s.cursorUpdatedAt = Date.now();
+    s.cursorRevision = Number(s.catalogRevision) || 0;
+    activePlaybackSession = {seriesId:s.id,videoId:e.id,order:e.order,catalogRevision:Number(s.catalogRevision)||0};
     saveDB();
     location.href = urlFor(e.id, s.playlistId, s.playlistId ? e.order : undefined, resume && !startsHere && !isWatched(e.id) ? st.position : 0);
   }
   function setSeriesStartHere(series, episode) {
     if (!series || !episode || episode.available === false || episode.unavailable || !/^[A-Za-z0-9_-]{11}$/.test(episode.id)) return false;
+    rememberDatabaseUndo('set start episode');
     series.startHereVideoId = episode.id;
     series.startHereOrder = Number.isInteger(episode.order) ? episode.order : -1;
     series.cursorVideoId = episode.id;
     series.cursorOrder = series.startHereOrder;
     series.cursorUpdatedAt = Date.now();
+    series.cursorRevision = Number(series.catalogRevision) || 0;
     saveDB();
     renderPanel();
     toast('Continue watching will start here: ' + (episode.title || 'selected episode'));
@@ -1078,12 +1342,56 @@
   }
   function markEpisode(id, watched) {
     if (!/^[A-Za-z0-9_-]{11}$/.test(id)) return;
-    const st = stateFor(id);
-    rememberUndo([id], watched ? 'mark episode watched' : 'mark episode unwatched');
-    setState(id, { watched, completionOverride: watched ? 'WATCHED' : 'UNWATCHED', position: watched ? (st.duration || st.position) : 0 });
+    const state = stateFor(id);
+    const override = watched === 'AUTO' ? 'AUTO' : watched ? 'WATCHED' : 'UNWATCHED';
+    const automatic = shouldAutoComplete(
+      state.position, state.duration,
+      Number(db.settings.watchedThreshold),
+      Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS)
+    );
+    const nextWatched = override === 'WATCHED' ? true : override === 'UNWATCHED' ? false : automatic;
+    rememberUndo([id], override === 'AUTO' ? 'restore automatic completion' : nextWatched ? 'mark episode watched' : 'mark episode unwatched');
+    setState(id, {
+      watched: nextWatched,
+      completionOverride: override,
+      position: override === 'WATCHED' ? (state.duration || state.position) : state.position
+    });
     renderPanel();
-    toast('Episode status updated. Use Undo to reverse.');
+    toast(override === 'AUTO' ? 'Automatic watched status restored.' : 'Episode status updated. Use Undo to reverse.');
   }
+  function showEpisodeMenu(series, episode) {
+    if (!series || !episode || episode.unavailable || episode.available === false
+        || !/^[A-Za-z0-9_-]{11}$/.test(episode.id)) return;
+    const state = stateFor(episode.id);
+    const watched = isWatched(episode.id);
+    const panel = document.getElementById(PANEL);
+    if (!panel) return;
+    panel.querySelector('#yst2-episode-menu-dialog')?.remove();
+    const actions = [];
+    if (!watched && state.position > 5) actions.push(['Restart from 0:00', () => openEpisode(series, episode, false)]);
+    actions.push([watched ? 'Play again from 0:00' : 'Resume at ' + fmt(state.position), () => openEpisode(series, episode, !watched)]);
+    actions.push(['Start here for Continue watching', () => setSeriesStartHere(series, episode)]);
+    actions.push([watched ? 'Mark unwatched' : 'Mark watched', () => markEpisode(episode.id, !watched)]);
+    if (state.completionOverride !== 'AUTO') actions.push(['Use automatic watched status', () => markEpisode(episode.id, 'AUTO')]);
+    actions.push(['Mark watched through this episode', () => markThrough(series, episode)]);
+    const modal = document.createElement('div');
+    modal.id = 'yst2-episode-menu-dialog';
+    modal.className = 'yst2-modal-backdrop';
+    modal.innerHTML = '<section class="yst2-modal" role="dialog" aria-modal="true" aria-labelledby="yst2-episode-menu-title">'
+      + '<header class="yst2-modal-head"><div><h3 id="yst2-episode-menu-title">' + esc(episode.title || 'Episode options') + '</h3><p class="yst2-muted">' + esc(series.title) + '</p></div><button class="yst2-icon" data-close aria-label="Close">×</button></header>'
+      + '<div class="yst2-menu-actions">' + actions.map((item,index) => '<button class="yst2-menu-action" type="button" data-action="' + index + '">' + esc(item[0]) + '</button>').join('') + '</div>'
+      + '<button class="yst2-subbtn" type="button" data-close>Cancel</button></section>';
+    panel.appendChild(modal);
+    modal.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', () => {
+      const action = actions[Number(button.dataset.action)];
+      modal.remove();
+      if (action) action[1]();
+    }));
+    modal.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', () => modal.remove()));
+    modal.addEventListener('click', event => { if (event.target === modal) modal.remove(); });
+    modal.addEventListener('keydown', event => { if (event.key === 'Escape') modal.remove(); });
+  }
+
   function episodeHTML(s,e) {
     const unavailable = Boolean(e.unavailable || e.available === false || !/^[A-Za-z0-9_-]{11}$/.test(e.id));
     const st = unavailable ? { watched:false, position:0, duration:e.duration||0 } : stateFor(e.id);
@@ -1095,11 +1403,12 @@
       + (thumbnail ? '<img class="yst2-thumb" loading="lazy" alt="" src="' + esc(thumbnail) + '">' : '<div class="yst2-thumb yst2-thumb-empty" aria-hidden="true">—</div>')
       + '<div class="yst2-epbody"><button class="yst2-epname" data-play="' + esc(e.id) + '" data-sid="' + esc(s.id) + '" data-order="' + esc(e.order) + '"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>'
       + esc(e.title || (unavailable ? 'Unavailable video' : st.title || e.id)) + '</button>'
-      + '<div class="yst2-muted">' + esc(status) + (!unavailable && (st.duration || e.duration) ? ' · ' + fmt(st.duration || e.duration) : '') + '</div>'
+      + '<div class="yst2-muted">' + esc(status) + (!unavailable && (st.duration || e.duration) ? ' · ' + fmt(st.duration || e.duration) : '') + (e.videoInfo ? ' · ' + esc(e.videoInfo) : '') + '</div>'
       + '<div class="yst2-bar"><i style="width:' + p + '%"></i></div></div>'
       + '<button class="yst2-mark ' + (watched ? 'checked' : '') + '" data-mark="' + esc(e.id) + '" title="' + (watched ? 'Mark unwatched' : 'Mark watched') + '"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>' + (watched ? '✓' : '○') + '</button>'
       + '<button class="yst2-through" data-through="' + esc(e.id) + '" data-sid="' + esc(s.id) + '" data-order="' + esc(e.order) + '" title="Mark watched through this episode" aria-label="Mark watched through this episode"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>⇢</button>'
       + '<button class="yst2-start-here" data-start-here="' + esc(e.id) + '" data-sid="' + esc(s.id) + '" data-order="' + esc(e.order) + '" title="Continue this series from this episode" aria-label="Continue this series from this episode"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>↳</button>'
+      + '<button class="yst2-episode-menu" data-episode-menu="' + esc(e.id) + '" data-sid="' + esc(s.id) + '" data-order="' + esc(e.order) + '" title="Episode options" aria-label="Episode options"' + (unavailable ? ' disabled aria-disabled="true"' : '') + '>⋯</button>'
       + '</article>';
   }
   function saveVideoToSeries(series, meta) {
@@ -1156,6 +1465,110 @@
     return true;
   }
 
+  function showFollowPlaylistDialog() {
+    const panel = document.getElementById(PANEL);
+    if (!panel) return;
+    panel.querySelector('#yst2-follow-playlist-dialog')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'yst2-follow-playlist-dialog';
+    modal.className = 'yst2-modal-backdrop';
+    modal.innerHTML = '<section class="yst2-modal" role="dialog" aria-modal="true" aria-labelledby="yst2-follow-playlist-title">'
+      + '<header class="yst2-modal-head"><div><h3 id="yst2-follow-playlist-title">Follow a YouTube playlist</h3><p class="yst2-muted">Paste a playlist URL or playlist ID.</p></div><button class="yst2-icon" data-close aria-label="Close">×</button></header>'
+      + '<label class="yst2-dialog-label" for="yst2-follow-playlist-input">Playlist link or ID</label><input id="yst2-follow-playlist-input" class="yst2-dialog-input" type="text" maxlength="2048" placeholder="https://www.youtube.com/playlist?list=…">'
+      + '<button id="yst2-follow-playlist-load" class="yst2-mainbtn" type="button">Load playlist</button><p id="yst2-follow-playlist-status" class="yst2-muted"></p><button class="yst2-subbtn" data-close>Cancel</button></section>';
+    panel.appendChild(modal);
+    const input = modal.querySelector('#yst2-follow-playlist-input');
+    const button = modal.querySelector('#yst2-follow-playlist-load');
+    const status = modal.querySelector('#yst2-follow-playlist-status');
+    const close = () => modal.remove();
+    modal.querySelectorAll('[data-close]').forEach(item => item.addEventListener('click', close));
+    modal.addEventListener('click', event => { if (event.target === modal) close(); });
+    modal.addEventListener('keydown', event => { if (event.key === 'Escape') close(); });
+    button.addEventListener('click', async () => {
+      const id = parsePlaylistInput(input.value);
+      if (!id) { status.textContent = 'Enter a supported YouTube playlist link or ID.'; return; }
+      if (findSeries(id)) { close(); await refreshSeries(id, false); return; }
+      button.disabled = true;
+      status.textContent = 'Loading all playlist pages…';
+      try {
+        const catalog = await fetchFullPlaylist(id);
+        if (!catalog.items.length) throw new Error('No playlist episodes were found.');
+        close();
+        showPlaylistFollowWizard({ id, title: catalog.title || id, items: catalog.items });
+      } catch (error) {
+        button.disabled = false;
+        status.textContent = (error?.message || 'Could not load playlist.') + ' No library changes were made.';
+      }
+    });
+    input.focus();
+  }
+  function showPlaylistFollowWizard(candidate) {
+    const panel = document.getElementById(PANEL);
+    if (!panel || !candidate?.items?.length) return;
+    panel.querySelector('#yst2-follow-wizard')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'yst2-follow-wizard';
+    modal.className = 'yst2-modal-backdrop';
+    modal.innerHTML = '<section class="yst2-modal" role="dialog" aria-modal="true" aria-labelledby="yst2-follow-wizard-title">'
+      + '<header class="yst2-modal-head"><div><h3 id="yst2-follow-wizard-title">Follow ' + esc(candidate.title) + '</h3><p class="yst2-muted">Choose playback order and where Continue watching should begin.</p></div><button class="yst2-icon" data-close aria-label="Close">×</button></header>'
+      + '<label class="yst2-dialog-label" for="yst2-follow-wizard-order">Episode order</label><select id="yst2-follow-wizard-order" class="yst2-dialog-select"><option value="playlist">YouTube playlist order</option><option value="reverse">Reverse playlist order</option></select>'
+      + '<label class="yst2-dialog-label" for="yst2-follow-wizard-start">Start episode</label><select id="yst2-follow-wizard-start" class="yst2-dialog-select"></select>'
+      + '<label class="yst2-setting"><input id="yst2-follow-wizard-previous" type="checkbox"> Mark earlier episodes watched</label>'
+      + '<button id="yst2-follow-wizard-save" class="yst2-mainbtn" type="button">Follow series</button><button class="yst2-subbtn" data-close>Cancel</button></section>';
+    panel.appendChild(modal);
+    const order = modal.querySelector('#yst2-follow-wizard-order');
+    const start = modal.querySelector('#yst2-follow-wizard-start');
+    const previous = modal.querySelector('#yst2-follow-wizard-previous');
+    const ordered = () => {
+      const items = [...candidate.items].sort((a,b) => (a.order ?? 0) - (b.order ?? 0));
+      if (order.value === 'reverse') items.reverse();
+      return items.filter(ep => ep.available !== false && !ep.unavailable && /^[A-Za-z0-9_-]{11}$/.test(ep.id));
+    };
+    const refreshChoices = () => {
+      const items = ordered();
+      start.innerHTML = items.map((ep,index) => '<option value="' + index + '">' + esc(ep.title || ('Episode ' + (index+1))) + '</option>').join('');
+      previous.disabled = items.length < 2;
+      previous.checked = false;
+    };
+    order.addEventListener('change', refreshChoices);
+    refreshChoices();
+    const close = () => modal.remove();
+    modal.querySelectorAll('[data-close]').forEach(item => item.addEventListener('click', close));
+    modal.addEventListener('click', event => { if (event.target === modal) close(); });
+    modal.addEventListener('keydown', event => { if (event.key === 'Escape') modal.remove(); });
+    modal.querySelector('#yst2-follow-wizard-save').addEventListener('click', () => {
+      const items = ordered();
+      const selected = items[Number(start.value)];
+      if (!selected) return;
+      rememberDatabaseUndo('follow playlist');
+      const series = mergeSeries(candidate.id, candidate.title || candidate.id, candidate.items);
+      series.playbackReverse = order.value === 'reverse';
+      const selectedIndex = items.findIndex(ep => ep.id === selected.id && ep.order === selected.order);
+      const now = Date.now();
+      if (previous.checked) {
+        for (const episode of items.slice(0, selectedIndex)) {
+          const old = stateFor(episode.id);
+          const wasWatched = isWatched(episode.id);
+          db.episodes[episode.id] = {
+            ...old, watched: true, completionOverride: 'WATCHED',
+            position: old.duration || episode.duration || old.position,
+            duration: old.duration || episode.duration || 0,
+            updatedAt: now, lastWatchedAt: wasWatched ? old.lastWatchedAt : now
+          };
+        }
+      }
+      series.cursorVideoId = selected.id;
+      series.cursorOrder = selected.order;
+      series.cursorUpdatedAt = now;
+      series.cursorRevision = Number(series.catalogRevision) || 0;
+      series.startHereVideoId = selected.id;
+      series.startHereOrder = selected.order;
+      saveDB();
+      close();
+      showSeriesInLibrary(series);
+      toast('Followed ' + series.title + ' · ' + series.episodes.length + ' episodes.');
+    });
+  }
   function showAddVideoDialog() {
     const meta = videoMeta();
     if (!meta) {
@@ -1218,8 +1631,47 @@
     titleInput.focus();
   }
 
+  function showRecoveryChooser(series) {
+    if (!series) return;
+    const panel = document.getElementById(PANEL);
+    if (!panel) return;
+    panel.querySelector('#yst2-recovery-dialog')?.remove();
+    const remembered = series.recoveryVideoId || series.cursorVideoId || '';
+    const occurrences = orderedEpisodes(series).filter(ep => ep.available !== false && !ep.unavailable && /^[A-Za-z0-9_-]{11}$/.test(ep.id));
+    const modal = document.createElement('div');
+    modal.id = 'yst2-recovery-dialog';
+    modal.className = 'yst2-modal-backdrop';
+    modal.innerHTML = '<section class="yst2-modal" role="dialog" aria-modal="true" aria-labelledby="yst2-recovery-title">'
+      + '<header class="yst2-modal-head"><div><h3 id="yst2-recovery-title">Choose where to continue</h3><p class="yst2-muted">The playlist changed, so the saved episode position needs your confirmation.</p></div>'
+      + '<button type="button" class="yst2-icon" data-recovery-close aria-label="Close">×</button></header>'
+      + '<p class="yst2-muted">' + (remembered ? 'Previous saved video: ' + esc(remembered) : 'Select an episode to continue from.') + '</p>'
+      + '<div class="yst2-candidate-list">' + occurrences.map(ep => '<button class="yst2-candidate" type="button" data-recovery-episode="' + esc(ep.id) + '" data-order="' + esc(ep.order) + '">'
+        + '<span class="yst2-candidate-copy"><strong>' + esc(ep.title || ep.id) + '</strong><small>' + (isWatched(ep.id) ? 'Watched' : (stateFor(ep.id).position > 5 ? 'Resume at ' + fmt(stateFor(ep.id).position) : 'Not started')) + '</small></span><span class="yst2-candidate-arrow">›</span></button>').join('')
+      + '</div><button type="button" class="yst2-subbtn" data-recovery-close>Cancel</button></section>';
+    panel.appendChild(modal);
+    modal.querySelectorAll('[data-recovery-episode]').forEach(button => button.addEventListener('click', () => {
+      const episode = occurrences.find(ep => ep.id === button.dataset.recoveryEpisode && ep.order === Number(button.dataset.order));
+      if (!episode) return;
+      series.cursorVideoId = episode.id;
+      series.cursorOrder = episode.order;
+      series.cursorRevision = Number(series.catalogRevision) || 0;
+      series.cursorUpdatedAt = Date.now();
+      series.recoveryRequired = false;
+      series.recoveryVideoId = '';
+      series.startHereVideoId = '';
+      series.startHereOrder = -1;
+      saveDB();
+      modal.remove();
+      renderPanel();
+      openEpisode(series, episode);
+    }));
+    modal.querySelectorAll('[data-recovery-close]').forEach(button => button.addEventListener('click', () => modal.remove()));
+    modal.addEventListener('click', event => { if (event.target === modal) modal.remove(); });
+    modal.addEventListener('keydown', event => { if (event.key === 'Escape') modal.remove(); });
+  }
+
   function seriesHTML(s) {
-    const st = stats(s), cont = chooseContinue(s);
+    const st = stats(s), plan = resumePlan(s), cont = plan.episode;
     const coverEpisode = orderedEpisodes(s).find(e => e.available !== false && !e.unavailable && /^[A-Za-z0-9_-]{11}$/.test(e.id));
     const cover = coverEpisode?.thumb || (coverEpisode?.id ? 'https://i.ytimg.com/vi/' + coverEpisode.id + '/hqdefault.jpg' : '');
     return '<section class="yst2-series yst2-filter-item" data-series-card="' + esc(s.id) + '">'
@@ -1227,7 +1679,9 @@
       + '<div class="yst2-series-art">' + (cover ? '<img loading="lazy" src="' + esc(cover) + '" alt="">' : '<div class="yst2-series-art-placeholder">▶</div>') + '<span>' + st.total + ' eps</span></div>'
       + '<div class="yst2-series-info"><header class="yst2-serieshead">'
       + '<div class="yst2-seriestitle">' + esc(s.title) + '</div>'
+      + (st.newCount ? '<button class="yst2-new-count" data-ack-new="' + esc(s.id) + '" title="Acknowledge new episodes">+' + st.newCount + ' new</button>' : '')
       + (s.playlistId ? '<button class="yst2-icon" data-sync="' + esc(s.id) + '" title="Refresh entire playlist" aria-label="Refresh ' + esc(s.title) + '">↻</button>' : '<span class="yst2-manual-label">Manual</span>')
+      + (s.playlistId ? '<button class="yst2-icon" data-open-playlist="' + esc(s.id) + '" title="Open playlist in YouTube" aria-label="Open playlist in YouTube">↗</button>' : '')
       + '<button class="yst2-icon" data-hide-watched="' + esc(s.id) + '" title="' + (s.hideWatched ? 'Show watched episodes' : 'Hide watched episodes') + '" aria-label="' + (s.hideWatched ? 'Show watched episodes' : 'Hide watched episodes') + '">' + (s.hideWatched ? '◉' : '◌') + '</button>'
       + '<button class="yst2-icon" data-order="' + esc(s.id) + '" title="' + (s.playbackReverse ? 'Use playlist order' : 'Use chronological episode order') + '" aria-label="Change episode order">⇅</button>'
       + '<button class="yst2-icon" data-edit="' + esc(s.id) + '" title="Rename series" aria-label="Rename ' + esc(s.title) + '">✎</button>'
@@ -1235,7 +1689,7 @@
       + '</header><div class="yst2-muted">' + st.watched + '/' + st.playable + ' playable watched <span class="yst2-dot">·</span> ' + st.active + ' in progress</div>'
       + '<div class="yst2-bar big" role="progressbar" aria-label="' + esc(s.title) + ' progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + st.pct + '"><i style="width:' + st.pct + '%"></i></div>'
       + '<div class="yst2-series-footline"><span class="yst2-progress-label">' + st.pct + '% complete</span>' + (st.left ? '<span>' + fmt(st.left) + ' left</span>' : '') + '</div>'
-      + (cont ? '<button class="yst2-continue" data-continue="' + esc(s.id) + '"><span class="yst2-continue-icon">▶</span><span class="yst2-continue-copy"><strong>Continue watching</strong><small>' + esc(cont.title) + '</small></span><span class="yst2-continue-arrow">↗</span></button>' : '<div class="yst2-done">✓ All episodes watched</div>')
+      + (plan.kind === 'CHOOSE' ? '<button class="yst2-continue" data-recovery="' + esc(s.id) + '"><span class="yst2-continue-icon">↗</span><span class="yst2-continue-copy"><strong>Choose where to continue</strong><small>The playlist changed; select an episode</small></span></button>' : cont ? '<button class="yst2-continue" data-continue="' + esc(s.id) + '"><span class="yst2-continue-icon">▶</span><span class="yst2-continue-copy"><strong>Continue watching</strong><small>' + esc(cont.title) + '</small></span><span class="yst2-continue-arrow">↗</span></button>' : plan.kind === 'NO_PLAYABLE' ? '<div class="yst2-done">No playable episodes in this playlist</div>' : '<div class="yst2-done">✓ All episodes watched</div>')
       + '</div></div>'
       + '<details class="yst2-details" data-series-details="' + esc(s.id) + '"><summary><span>Episodes</span><span class="yst2-summary-count">' + st.total + '</span><span class="yst2-summary-spacer"></span><span class="yst2-summary-hint">View list</span><span class="yst2-chevron">⌄</span></summary>'
       + '<div class="yst2-episode-list" data-episode-list="' + esc(s.id) + '" data-offset="0"></div>'
@@ -1260,6 +1714,13 @@
       const series = db.series.find(item => item.id === through.dataset.sid);
       const episode = series?.episodes.find(item => item.id === through.dataset.through && item.order === Number(through.dataset.order));
       if (series && episode) markThrough(series, episode);
+    });
+    const menu = article.querySelector('[data-episode-menu]');
+    menu?.addEventListener('click', () => {
+      if (menu.disabled) return;
+      const series = db.series.find(item => item.id === menu.dataset.sid);
+      const episode = series?.episodes.find(item => item.id === menu.dataset.episodeMenu && item.order === Number(menu.dataset.order));
+      if (series && episode) showEpisodeMenu(series, episode);
     });
     const start = article.querySelector('[data-start-here]');
     start?.addEventListener('click', () => {
@@ -1337,8 +1798,8 @@
         <div class="yst2-overall-progress"><div class="yst2-overall-label"><span>Overall progress</span><span>${watched} of ${total}</span></div><div class="yst2-bar big" role="progressbar" aria-label="Overall progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><i style="width:${pct}%"></i></div></div>
       </section>
       <section class="yst2-toolbar" aria-label="Tracker actions">
-        <div class="yst2-primary-actions"><button id="yst2-add-current" class="yst2-mainbtn"><span aria-hidden="true">＋</span> Add video</button><button id="yst2-sync" class="yst2-subbtn"><span aria-hidden="true">↻</span> Sync playlist</button></div>
-        <div class="yst2-data-actions"><button id="yst2-export" class="yst2-icon" title="Export backup" aria-label="Export backup">⇩</button><button id="yst2-import" class="yst2-icon" title="Import backup" aria-label="Import backup">⇧</button></div>
+        <div class="yst2-primary-actions"><button id="yst2-add-current" class="yst2-mainbtn"><span aria-hidden="true">＋</span> Add video</button><button id="yst2-sync" class="yst2-subbtn"><span aria-hidden="true">↻</span> Sync playlist</button><button id="yst2-follow-playlist" class="yst2-subbtn">Follow link</button></div>
+        <div class="yst2-data-actions"><button id="yst2-export" class="yst2-icon" title="Export full tracker backup" aria-label="Export full tracker backup">⇩</button><button id="yst2-export-morphe" class="yst2-icon" title="Export Morphe-compatible backup" aria-label="Export Morphe-compatible backup">M</button><button id="yst2-import" class="yst2-icon" title="Import or merge backup" aria-label="Import or merge backup">⇧</button></div>
       </section>
       <nav class="yst2-tabs" role="tablist" aria-label="Tracker sections">${tabs.map(([k,v,count])=>`<button role="tab" data-tab="${k}" aria-selected="${activeTab===k?'true':'false'}" class="${activeTab===k?'active':''}"><span>${v}</span>${count===null?'':`<span class="yst2-tab-count">${count}</span>`}</button>`).join('')}</nav>
       ${activeTab === 'settings' ? '' : `<div class="yst2-searchwrap"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"></circle><path d="m16 16 5 5"></path></svg><input id="yst2-search" type="search" value="${esc(librarySearch)}" placeholder="${activeTab==='history'?'Search history matches':'Search series and episodes'}" aria-label="Search ${activeTab==='history'?'history matches':'series and episodes'}"><kbd>⌕</kbd></div>`}
@@ -1365,6 +1826,7 @@
   function settingsHTML() {
     const s = db.settings;
     return `<section class="yst2-series"><h3>Playback & tracking</h3>
+      <label class="yst2-setting"><input type="checkbox" id="yst2-enabled" ${s.enabled!==false?'checked':''}> Enable Series Tracker</label>
       <label class="yst2-setting">Mark watched at <select id="yst2-threshold">
         ${[[0.5,'50%'],[0.75,'75%'],[0.9,'90%'],[0.95,'95%'],[1,'Video ends only']].map(([v,l])=>`<option value="${v}" ${Number(s.watchedThreshold)===v?'selected':''}>${l}</option>`).join('')}
       </select></label>
@@ -1372,7 +1834,14 @@
       <label class="yst2-setting"><input type="checkbox" id="yst2-autonext" ${s.autoNext?'checked':''}> Automatically play the next unwatched episode when a tracked episode ends</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-autosync" ${s.autoSyncOnOpen?'checked':''}> Automatically refresh the current tracked playlist when opened</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-sidebar" ${s.showSidebarButton!==false?'checked':''}> Show Series in YouTube navigation</label>
+      <label class="yst2-setting"><input type="checkbox" id="yst2-player-visible" ${s.showPlayerButton!==false?'checked':''}> Show Series and previous/next controls in the player</label>
+      <label class="yst2-setting"><input type="checkbox" id="yst2-record-progress" ${s.recordPlaybackProgress!==false?'checked':''}> Record local playback progress for followed episodes</label>
+      <label class="yst2-setting"><input type="checkbox" id="yst2-import-history" ${s.importHistoryProgress?'checked':''}> Use visible History progress bars for completion</label>
+      <label class="yst2-setting"><input type="checkbox" id="yst2-auto-catalog" ${s.catalogAutoRefresh!==false?'checked':''}> Refresh stale followed playlists automatically</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-historyscan" ${s.historyScan?'checked':''}> Match YouTube History page videos to known episodes</label>
+      <p class="yst2-muted">History import uses only progress indicators currently rendered on the History page. It never reads account identifiers or sends progress to a server.</p>
+      <button id="yst2-clear-progress" class="yst2-subbtn">Clear playback progress (keep series)</button>
+      <button id="yst2-clear-history" class="yst2-subbtn">Clear History matches</button>
       <p class="yst2-muted">Progress is stored in this Firefox profile on YouTube. It does not sync to Morphe or your Google account. You can export a backup at any time.</p>
       <button id="yst2-clear" class="yst2-subbtn dangerbtn">Delete all series and progress</button></section>
       <section class="yst2-series"><h3>Data tools</h3><button id="yst2-recount" class="yst2-subbtn">Recalculate watched status from saved positions</button><button id="yst2-markall" class="yst2-subbtn">Mark current series watched</button></section>`;
@@ -1408,6 +1877,7 @@
     search?.addEventListener('input', applySearch);
     applySearch();
     p.querySelector('#yst2-add-current')?.addEventListener('click', showAddVideoDialog);
+    p.querySelector('#yst2-follow-playlist')?.addEventListener('click', showFollowPlaylistDialog);
     p.querySelector('#yst2-sync')?.addEventListener('click', syncCurrentPlaylist);
     p.querySelectorAll('details[data-series-details]').forEach(details => {
       details.addEventListener('toggle', () => {
@@ -1421,36 +1891,318 @@
     p.querySelectorAll('[data-play]').forEach(b=>b.addEventListener('click',()=>{if(b.disabled)return;const s=db.series.find(x=>x.id===b.dataset.sid),e=s?.episodes.find(x=>x.id===b.dataset.play);if(s&&e)openEpisode(s,e);}));
     p.querySelectorAll('[data-hide-watched]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.hideWatched);if(!s)return;s.hideWatched=!s.hideWatched;saveDB();renderPanel();toast(s.hideWatched?'Watched episodes hidden.':'Watched episodes shown.');}));
     p.querySelectorAll('[data-order]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.order);if(!s)return;s.playbackReverse=!s.playbackReverse;saveDB();renderPanel();toast('Episode order: '+(s.playbackReverse?'chronological':'playlist')+'.');}));
-    p.querySelectorAll('[data-continue]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.continue);if(s)openEpisode(s,chooseContinue(s));}));
+    p.querySelectorAll('[data-continue]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.continue);const plan=s&&resumePlan(s);if(s&&plan?.episode){acknowledgeNewEpisodes(s.id);openEpisode(s,plan.episode);}}));
+    p.querySelectorAll('[data-recovery]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.recovery);if(s)showRecoveryChooser(s);}));
+    p.querySelectorAll('[data-ack-new]').forEach(b=>b.addEventListener('click',()=>acknowledgeNewEpisodes(b.dataset.ackNew)));
+    p.querySelectorAll('[data-open-playlist]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.openPlaylist);if(s?.playlistId)location.href='/playlist?list='+encodeURIComponent(s.playlistId);}));
     p.querySelectorAll('[data-mark]').forEach(b=>b.addEventListener('click',()=>{const id=b.dataset.mark;markEpisode(id,!isWatched(id));}));
     p.querySelectorAll('[data-through]').forEach(b=>b.addEventListener('click',()=>{const series=db.series.find(item=>item.id===b.dataset.sid);const ep=series?.episodes.find(item=>item.id===b.dataset.through&&item.order===Number(b.dataset.order));if(series&&ep)markThrough(series,ep);}));
     p.querySelectorAll('[data-start-here]').forEach(b=>b.addEventListener('click',()=>{const series=db.series.find(item=>item.id===b.dataset.sid);const ep=series?.episodes.find(item=>item.id===b.dataset.startHere&&item.order===Number(b.dataset.order));if(series&&ep)setSeriesStartHere(series,ep);}));
+    p.querySelectorAll('[data-episode-menu]').forEach(b=>b.addEventListener('click',()=>{const series=db.series.find(item=>item.id===b.dataset.sid);const episode=series?.episodes.find(item=>item.id===b.dataset.episodeMenu&&item.order===Number(b.dataset.order));if(series&&episode)showEpisodeMenu(series,episode);}));
     p.querySelector('#yst2-undo')?.addEventListener('click',undoLastChange);
-    p.querySelectorAll('[data-remove]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.remove);if(s&&confirm(`Remove “${s.title}” from the library? Progress will be retained for videos that appear in other series.`)){db.series=db.series.filter(x=>x.id!==s.id);saveDB();renderPanel();}}));
-    p.querySelectorAll('[data-sync]').forEach(b=>b.addEventListener('click',async()=>{if(getPlaylistId()!==b.dataset.sync){toast('Open this series playlist first, then refresh it.');return;}await syncCurrentPlaylist();}));
+    p.querySelectorAll('[data-remove]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.remove);if(s&&confirm(`Remove “${s.title}” from the library? You can undo for 8 seconds.`)){rememberDatabaseUndo('remove series');db.series=db.series.filter(x=>x.id!==s.id);saveDB();renderPanel();toast('Series removed. Undo is available for 8 seconds.');}}));
+    p.querySelectorAll('[data-sync]').forEach(b=>b.addEventListener('click',async()=>{await refreshSeries(b.dataset.sync,false);}));
     p.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.edit);if(!s)return;const n=prompt('Series name',s.title);if(n?.trim()){s.title=n.trim();saveDB();renderPanel();}}));
     p.querySelectorAll('[data-history-play]').forEach(b=>b.addEventListener('click',()=>{const id=b.dataset.historyPlay;const s=db.series.find(x=>x.episodes.some(e=>e.id===id));const e=s?.episodes.find(x=>x.id===id);if(s&&e)openEpisode(s,e);else location.href=urlFor(id);}));
     p.querySelector('#yst2-export')?.addEventListener('click',exportBackup);
+    p.querySelector('#yst2-export-morphe')?.addEventListener('click',exportMorpheBackup);
     p.querySelector('#yst2-import')?.addEventListener('click',importBackup);
+    p.querySelector('#yst2-enabled')?.addEventListener('change',e=>{db.settings.enabled=e.target.checked;saveDB();if(!e.target.checked){if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;}activePlaybackSession=null;currentVideoId='';activeVideo=null;addSidebarButton();addPlayerButton();addPlaylistFollowButton();toast('Series Tracker disabled. Your saved data is kept.');}else{ensureUI();trackCurrentVideo();toast('Series Tracker enabled.');}});
     p.querySelector('#yst2-threshold')?.addEventListener('change',e=>{db.settings.watchedThreshold=Number(e.target.value);saveDB();});
     p.querySelector('#yst2-remaining')?.addEventListener('change',e=>{db.settings.watchedRemainingSeconds=Number(e.target.value);saveDB();});
     p.querySelector('#yst2-autonext')?.addEventListener('change',e=>{db.settings.autoNext=e.target.checked;saveDB();});
     p.querySelector('#yst2-autosync')?.addEventListener('change',e=>{db.settings.autoSyncOnOpen=e.target.checked;saveDB();});
     p.querySelector('#yst2-historyscan')?.addEventListener('change',e=>{db.settings.historyScan=e.target.checked;saveDB();});
     p.querySelector('#yst2-sidebar')?.addEventListener('change',e=>{db.settings.showSidebarButton=e.target.checked;saveDB();addSidebarButton();});
-    p.querySelector('#yst2-clear')?.addEventListener('click',()=>{if(confirm('Permanently delete all series, episode progress, and history matches? Export a backup first if needed.')){db=emptyDB();saveDB();renderPanel();toast('Tracker data deleted.');}});
+    p.querySelector('#yst2-player-visible')?.addEventListener('change',e=>{db.settings.showPlayerButton=e.target.checked;saveDB();addPlayerButton();});
+    p.querySelector('#yst2-record-progress')?.addEventListener('change',e=>{if(e.target.checked&&!confirm('Record playback progress for followed episodes in this browser? This stays in YouTube local storage and is not sent to Morphe or Google.')){e.target.checked=false;return;}db.settings.recordPlaybackProgress=e.target.checked;saveDB();if(!e.target.checked)activePlaybackSession=null;});
+    p.querySelector('#yst2-import-history')?.addEventListener('change',e=>{db.settings.importHistoryProgress=e.target.checked;saveDB();});
+    p.querySelector('#yst2-auto-catalog')?.addEventListener('change',e=>{db.settings.catalogAutoRefresh=e.target.checked;saveDB();if(e.target.checked)refreshStaleSeries();});
+    p.querySelector('#yst2-clear-progress')?.addEventListener('click',()=>{if(confirm('Clear all playback positions and watched states but keep series catalogs?')){rememberDatabaseUndo('clear playback progress');db.episodes={};saveDB();renderPanel();toast('Playback progress cleared. Undo is available for 8 seconds.');}});
+    p.querySelector('#yst2-clear-history')?.addEventListener('click',()=>{if(confirm('Clear local History matches only?')){rememberDatabaseUndo('clear History matches');db.history={};saveDB();renderPanel();toast('History matches cleared. Undo is available for 8 seconds.');}});
+    p.querySelector('#yst2-clear')?.addEventListener('click',()=>{if(confirm('Permanently delete all series, episode progress, and History matches?')){rememberDatabaseUndo('delete all tracker data');db=emptyDB();saveDB();renderPanel();toast('Tracker data deleted. Undo is available for 8 seconds.');}});
     p.querySelector('#yst2-recount')?.addEventListener('click',()=>{rememberUndo(Object.keys(db.episodes),'recalculate completion');for(const [id,st] of Object.entries(db.episodes)){setState(id,{watched:shouldAutoComplete(st.position,st.duration,Number(db.settings.watchedThreshold),Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS)),completionOverride:'AUTO'},false);}saveDB();renderPanel();toast('Automatic completion recalculated.');});
     p.querySelector('#yst2-markall')?.addEventListener('click',()=>{const s=findSeries(getPlaylistId());if(!s){toast('Open a tracked series playlist first.');return;}const playable=s.episodes.filter(e=>e.available!==false&&!e.unavailable&&/^[A-Za-z0-9_-]{11}$/.test(e.id));if(confirm(`Mark all ${playable.length} playable episodes watched?`)){rememberUndo(playable.map(e=>e.id),'mark all episodes watched');const now=Date.now();for(const e of playable){const old=stateFor(e.id);const already=isWatched(e.id);db.episodes[e.id]={...old,watched:true,completionOverride:'WATCHED',position:old.duration||e.duration||old.position,duration:old.duration||e.duration||0,updatedAt:now,lastWatchedAt:already?old.lastWatchedAt:now};}saveDB();renderPanel();toast('All playable episodes marked watched.');}});
     p.querySelector('#yst2-scanhistory')?.addEventListener('click',scanHistoryPage);
   }
+  function adaptMorpheBackup(document) {
+    if (!document || document.format !== 'series-tracker' || document.version !== 1
+        || !Array.isArray(document.series) || !document.progress
+        || typeof document.progress !== 'object' || Array.isArray(document.progress)) throw new Error('Unsupported Morphe Series Tracker backup format.');
+    if (document.series.length > MAX_BACKUP_SERIES || Object.keys(document.progress).length > MAX_BACKUP_EPISODES) throw new Error('Morphe backup exceeds tracker limits.');
+    const series=[], episodes={}, referenced=new Set(), seenSeries=new Set();
+    for(const row of document.series){
+      if(!row||typeof row!=='object'||Array.isArray(row)||!Array.isArray(row.episodes))throw new Error('Invalid Morphe series record.');
+      const id=String(row.id||'');
+      if(!/^[A-Za-z0-9_-]{2,128}$/.test(id)||seenSeries.has(id))throw new Error('Invalid or duplicate Morphe series ID.');
+      seenSeries.add(id);
+      if(row.episodes.length>MAX_BACKUP_EPISODES)throw new Error('Morphe series has too many episodes.');
+      const occurrenceKeys=new Set();
+      const mappedEpisodes=row.episodes.map((ep,index)=>{
+        if(!ep||typeof ep!=='object'||Array.isArray(ep))throw new Error('Invalid Morphe episode.');
+        const ordinal=Number.isInteger(ep.ordinal)&&ep.ordinal>0?ep.ordinal:index+1;
+        const order=ordinal-1;
+        const rawId=String(ep.id||''),validId=/^[A-Za-z0-9_-]{11}$/.test(rawId);
+        const videoId=validId?rawId:'__yst_unavailable__'+id.slice(0,80)+'_'+order;
+        if(occurrenceKeys.has(videoId+':'+order))throw new Error('Duplicate Morphe episode occurrence.');
+        occurrenceKeys.add(videoId+':'+order);
+        if(validId)referenced.add(videoId);
+        const durationMs=Number(ep.duration)||0;
+        if(!Number.isFinite(durationMs)||durationMs<0||durationMs>604800000)throw new Error('Invalid Morphe episode duration.');
+        return {id:videoId,title:String(ep.title||'').slice(0,500),duration:durationMs/1000,order,
+          available:Boolean(ep.available&&validId),unavailable:!(ep.available&&validId),manuallyAdded:false,
+          videoInfo:String(ep.info||'').slice(0,240),thumb:validId?'https://i.ytimg.com/vi/'+rawId+'/hqdefault.jpg':'',
+          url:validId?'https://www.youtube.com/watch?v='+rawId:''};
+      });
+      const cursor=/^[A-Za-z0-9_-]{11}$/.test(String(row.cursor||''))?row.cursor:'';
+      const bookmark=/^[A-Za-z0-9_-]{11}$/.test(String(row.bookmark||''))?row.bookmark:'';
+      const recovery=/^[A-Za-z0-9_-]{11}$/.test(String(row.recovery||''))?row.recovery:'';
+      if(cursor)referenced.add(cursor);if(bookmark)referenced.add(bookmark);
+      series.push({id,playlistId:row.complete?id:null,manual:!row.complete,
+        title:String(row.name||'Imported series').trim().slice(0,500)||'Imported series',
+        episodes:mappedEpisodes,addedAt:Math.max(0,Number(row.activity)||Date.now()),
+        updatedAt:Math.max(0,Number(row.activity)||Date.now()),lastSyncedAt:Math.max(0,Number(row.fetchedAt)||0),
+        playbackReverse:Boolean(row.reverse),hideWatched:Boolean(row.hideWatched),cursorVideoId:cursor,
+        cursorOrder:Number.isInteger(row.ordinal)&&row.ordinal>0?row.ordinal-1:-1,
+        cursorUpdatedAt:Math.max(0,Number(row.activity)||0),catalogRevision:row.complete?1:0,
+        cursorRevision:row.cursorValid?(row.complete?1:0):-1,startHereVideoId:row.startHere?cursor:'',
+        startHereOrder:row.startHere&&Number.isInteger(row.ordinal)&&row.ordinal>0?row.ordinal-1:-1,
+        bookmarkVideoId:bookmark,recoveryVideoId:recovery});
+    }
+    for(const id of referenced){
+      const p=document.progress[id];if(!p||typeof p!=='object'||Array.isArray(p))continue;
+      const durationMs=Number(p.duration)||0,positionMs=Number(p.position)||0;
+      if(!Number.isFinite(durationMs)||!Number.isFinite(positionMs)||durationMs<0||durationMs>604800000||positionMs<0||positionMs>604800000)throw new Error('Invalid Morphe progress record.');
+      const override=['AUTO','WATCHED','UNWATCHED'].includes(p.override)?p.override:'AUTO';
+      episodes[id]={watched:override==='WATCHED'||(override==='AUTO'&&Boolean(p.completed)),completionOverride:override,
+        position:Math.min(positionMs/1000,durationMs>0?durationMs/1000:positionMs/1000),duration:durationMs/1000,title:'',
+        updatedAt:Math.max(0,Number(p.playedAt)||0),lastWatchedAt:Math.max(0,Number(p.playedAt)||0)};
+    }
+    return {series,episodes,history:{},settings:{},lastSync:0};
+  }
+  function validateBackupDocument(document) {
+    if (!document || typeof document !== 'object' || Array.isArray(document)) throw new Error('Backup must be a JSON object.');
+    const raw = document.format === 'series-tracker' ? adaptMorpheBackup(document)
+      : document.data && document.format === 'youtube-series-tracker' ? document.data : document;
+    if (!raw || typeof raw !== 'object' || !Array.isArray(raw.series)
+        || !raw.episodes || typeof raw.episodes !== 'object' || Array.isArray(raw.episodes)) {
+      throw new Error('Backup does not contain a series list and progress map.');
+    }
+    if (raw.series.length > MAX_BACKUP_SERIES) throw new Error('Backup contains too many series.');
+    const progressEntries = Object.entries(raw.episodes);
+    if (progressEntries.length > MAX_BACKUP_EPISODES) throw new Error('Backup contains too many progress records.');
+    const defaults = emptyDB();
+    const settings = { ...defaults.settings };
+    const supplied = raw.settings && typeof raw.settings === 'object' ? raw.settings : {};
+    if (Number.isFinite(Number(supplied.watchedThreshold)) && Number(supplied.watchedThreshold) >= 0.5 && Number(supplied.watchedThreshold) <= 1) settings.watchedThreshold = Number(supplied.watchedThreshold);
+    if (Number.isFinite(Number(supplied.watchedRemainingSeconds)) && Number(supplied.watchedRemainingSeconds) >= 0 && Number(supplied.watchedRemainingSeconds) <= 300) settings.watchedRemainingSeconds = Number(supplied.watchedRemainingSeconds);
+    for (const key of Object.keys(defaults.settings)) if (typeof supplied[key] === 'boolean') settings[key] = supplied[key];
+
+    const seenSeries = new Set();
+    let episodeCount = 0;
+    const series = raw.series.map((row, seriesIndex) => {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error('Invalid series record at index ' + seriesIndex + '.');
+      const id = String(row.id || '');
+      const title = String(row.title || '').trim();
+      if (!/^[A-Za-z0-9_-]{2,200}$/.test(id) || seenSeries.has(id) || !title || title.length > 500) {
+        throw new Error('Invalid or duplicate series identity.');
+      }
+      seenSeries.add(id);
+      if (!Array.isArray(row.episodes) || row.episodes.length > MAX_BACKUP_EPISODES) throw new Error('Invalid episode catalog size.');
+      episodeCount += row.episodes.length;
+      if (episodeCount > MAX_BACKUP_EPISODES) throw new Error('Backup contains too many episode entries.');
+      const occurrences = new Set();
+      const episodes = row.episodes.map((ep,index) => {
+        if (!ep || typeof ep !== 'object' || Array.isArray(ep)) throw new Error('Invalid episode record.');
+        const videoId = String(ep.id || '');
+        const unavailable = Boolean(ep.unavailable || ep.available === false || videoId.startsWith('__yst_unavailable__'));
+        if (!/^[A-Za-z0-9_-]{11}$/.test(videoId) && !(unavailable && /^__yst_unavailable__[A-Za-z0-9_-]{1,180}$/.test(videoId))) {
+          throw new Error('Invalid episode ID in series ' + title + '.');
+        }
+        const order = Number.isInteger(ep.order) && ep.order >= 0 && ep.order <= 1000000 ? ep.order : index;
+        const occurrence = videoId + ':' + order;
+        if (occurrences.has(occurrence)) throw new Error('Duplicate episode occurrence in series ' + title + '.');
+        occurrences.add(occurrence);
+        const duration = Number(ep.duration) || 0;
+        if (!Number.isFinite(duration) || duration < 0 || duration > 604800) throw new Error('Invalid episode duration.');
+        const thumb = String(ep.thumb || '');
+        return {
+          id: videoId,
+          title: String(ep.title || '').slice(0,500),
+          duration,
+          thumb: thumb.startsWith('https://') ? thumb.slice(0,2048) : '',
+          url: unavailable ? '' : 'https://www.youtube.com/watch?v=' + videoId,
+          order,
+          available: !unavailable,
+          unavailable,
+          videoInfo: String(ep.videoInfo || '').slice(0,240),
+          manuallyAdded: Boolean(ep.manuallyAdded)
+        };
+      });
+      const cursorVideoId = /^[A-Za-z0-9_-]{11}$/.test(String(row.cursorVideoId || '')) ? row.cursorVideoId : '';
+      const bookmarkVideoId = /^[A-Za-z0-9_-]{11}$/.test(String(row.bookmarkVideoId || '')) ? row.bookmarkVideoId : '';
+      const startHereVideoId = /^[A-Za-z0-9_-]{11}$/.test(String(row.startHereVideoId || '')) ? row.startHereVideoId : '';
+      const newEpisodeIds = Array.isArray(row.newEpisodeIds) ? [...new Set(row.newEpisodeIds.filter(value => /^[A-Za-z0-9_-]{11}$/.test(value)))].slice(0,10000) : [];
+      return {
+        id,
+        playlistId: row.playlistId ? String(row.playlistId).slice(0,200) : null,
+        manual: Boolean(row.manual || !row.playlistId),
+        title,
+        episodes,
+        addedAt: Math.max(0,Number(row.addedAt)||Date.now()),
+        updatedAt: Math.max(0,Number(row.updatedAt)||Date.now()),
+        lastSyncedAt: Math.max(0,Number(row.lastSyncedAt)||0),
+        playbackReverse: Boolean(row.playbackReverse),
+        hideWatched: Boolean(row.hideWatched),
+        cursorVideoId,
+        bookmarkVideoId,
+        cursorOrder: Number.isInteger(row.cursorOrder) ? row.cursorOrder : -1,
+        cursorUpdatedAt: Math.max(0,Number(row.cursorUpdatedAt)||0),
+        catalogRevision: Number.isInteger(row.catalogRevision) ? Math.max(0,row.catalogRevision) : (episodes.length ? 1 : 0),
+        cursorRevision: Number.isInteger(row.cursorRevision) ? Math.max(0,row.cursorRevision) : 0,
+        newEpisodeIds,
+        startHereVideoId,
+        startHereOrder: Number.isInteger(row.startHereOrder) ? row.startHereOrder : -1,
+        lastRefreshAttemptAt: Math.max(0,Number(row.lastRefreshAttemptAt)||0),
+        refreshRetryAt: Math.max(0,Number(row.refreshRetryAt)||0),
+        refreshError: String(row.refreshError||'').slice(0,240),
+        recoveryRequired: Boolean(row.recoveryRequired),
+        recoveryVideoId: /^[A-Za-z0-9_-]{11}$/.test(String(row.recoveryVideoId||'')) ? row.recoveryVideoId : ''
+      };
+    });
+
+    const episodes = {};
+    for (const [id,state] of progressEntries) {
+      if (!/^[A-Za-z0-9_-]{11}$/.test(id) || !state || typeof state !== 'object' || Array.isArray(state)) continue;
+      const duration = Number(state.duration) || 0;
+      const position = Number(state.position) || 0;
+      if (!Number.isFinite(duration) || !Number.isFinite(position) || duration < 0 || duration > 604800 || position < 0 || position > 604800) continue;
+      const completionOverride = ['AUTO','WATCHED','UNWATCHED'].includes(state.completionOverride) ? state.completionOverride : 'AUTO';
+      episodes[id] = {
+        watched: Boolean(state.watched),
+        completionOverride,
+        position: Math.min(position,duration || position),
+        duration,
+        title: String(state.title||'').slice(0,500),
+        updatedAt: Math.max(0,Number(state.updatedAt)||0),
+        lastWatchedAt: Math.max(0,Number(state.lastWatchedAt)||0)
+      };
+    }
+    const history = {};
+    if (raw.history && typeof raw.history === 'object' && !Array.isArray(raw.history)) {
+      for (const [id,item] of Object.entries(raw.history).slice(0,MAX_BACKUP_EPISODES)) {
+        if (/^[A-Za-z0-9_-]{11}$/.test(id) && item && typeof item === 'object' && !Array.isArray(item)) {
+          history[id] = {
+            title: String(item.title||'').slice(0,500),
+            lastSeen: Math.max(0,Number(item.lastSeen)||0),
+            percent: Number.isFinite(Number(item.percent)) ? Math.max(0,Math.min(100,Number(item.percent))) : null
+          };
+        }
+      }
+    }
+    return { ...defaults, version: VERSION, settings, series, episodes, history, lastSync: Math.max(0,Number(raw.lastSync)||0) };
+  }
   function exportBackup() {
-    const blob = new Blob([JSON.stringify(db,null,2)],{type:'application/json'});
+    const document = { format: 'youtube-series-tracker', formatVersion: 1, exportedAt: new Date().toISOString(), data: db };
+    const blob = new Blob([JSON.stringify(document,null,2)],{type:'application/json'});
     const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download='youtube-series-backup.json';a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);
+  }
+  function exportMorpheBackup() {
+    const series=db.series.map(row=>({
+      id:String(row.id),name:String(row.title||'Series'),
+      complete:Boolean((row.playlistId||(row.episodes||[]).length)&&(row.episodes||[]).length),
+      reverse:Boolean(row.playbackReverse),hideWatched:Boolean(row.hideWatched),
+      cursor:/^[A-Za-z0-9_-]{11}$/.test(String(row.cursorVideoId||''))?row.cursorVideoId:'',
+      ordinal:Number.isInteger(row.cursorOrder)&&row.cursorOrder>=0?row.cursorOrder+1:-1,
+      cursorValid:Number(row.cursorRevision)===Number(row.catalogRevision),
+      bookmark:/^[A-Za-z0-9_-]{11}$/.test(String(row.bookmarkVideoId||''))?row.bookmarkVideoId:'',
+      startHere:Boolean(row.startHereVideoId),fetchedAt:Math.max(0,Number(row.lastSyncedAt)||0),
+      activity:Math.max(0,Number(row.updatedAt)||0),
+      recovery:/^[A-Za-z0-9_-]{11}$/.test(String(row.recoveryVideoId||''))?row.recoveryVideoId:'',
+      episodes:(row.episodes||[]).map((ep,index)=>({
+        ordinal:(Number.isInteger(ep.order)&&ep.order>=0?ep.order:index)+1,
+        id:/^[A-Za-z0-9_-]{11}$/.test(String(ep.id||''))?ep.id:'',
+        title:String(ep.title||''),info:String(ep.videoInfo||''),
+        duration:Math.round((Number(ep.duration)||0)*1000),
+        available:ep.available!==false&&!ep.unavailable&&/^[A-Za-z0-9_-]{11}$/.test(String(ep.id||''))
+      }))
+    }));
+    const references=new Set();
+    for(const row of db.series){
+      for(const ep of row.episodes||[])if(/^[A-Za-z0-9_-]{11}$/.test(String(ep.id||'')))references.add(ep.id);
+      for(const id of [row.cursorVideoId,row.bookmarkVideoId])if(/^[A-Za-z0-9_-]{11}$/.test(String(id||'')))references.add(id);
+    }
+    const progress={};
+    for(const id of references){
+      const state=stateFor(id);
+      progress[id]={position:Math.round((Number(state.position)||0)*1000),duration:Math.round((Number(state.duration)||0)*1000),
+        completed:Boolean(state.watched&&state.completionOverride==='AUTO'),
+        override:['AUTO','WATCHED','UNWATCHED'].includes(state.completionOverride)?state.completionOverride:'AUTO',
+        playedAt:Math.max(0,Number(state.updatedAt)||0)};
+    }
+    const backup={format:'series-tracker',version:1,series,progress};
+    if(JSON.stringify(backup).length>MAX_BACKUP_CHARS){toast('Morphe-compatible backup exceeds the 8 MB limit.');return;}
+    const blob=new Blob([JSON.stringify(backup,null,2)],{type:'application/json'});
+    const url=URL.createObjectURL(blob),anchor=document.createElement('a');
+    anchor.href=url;anchor.download='series-tracker-morphe-compatible.json';anchor.click();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+    toast('Morphe-compatible library backup exported.');
   }
   function importBackup() {
     const input=document.createElement('input');input.type='file';input.accept='.json,application/json';
-    input.onchange=async()=>{try{const p=JSON.parse(await input.files[0].text());if(!Array.isArray(p.series)||!p.episodes||typeof p.episodes!=='object')throw new Error('invalid');if(!confirm('Replace current tracker data with this backup?'))return;const base=emptyDB();db={...base,...p,settings:{...base.settings,...(p.settings||{})}};saveDB();renderPanel();toast('Backup imported.');}catch(_){toast('Invalid backup file.');}};
+    input.onchange=async()=>{
+      try{
+        if(!input.files||!input.files[0])return;
+        if(input.files[0].size>MAX_BACKUP_CHARS)throw new Error('Backup exceeds the 8 MB size limit.');
+        const restored=validateBackupDocument(JSON.parse(await input.files[0].text()));
+        const existingIds=new Set(db.series.map(series=>series.id));
+        const missingSeries=restored.series.filter(series=>!existingIds.has(series.id));
+        const overlap=restored.series.length-missingSeries.length;
+        const episodeCount=restored.series.reduce((n,series)=>n+series.episodes.length,0);
+        const progressCount=Object.keys(restored.episodes).length;
+        const preview=['Backup preview',restored.series.length+' series',episodeCount+' episode entries',
+          progressCount+' progress records',overlap+' existing series will be left unchanged',
+          missingSeries.length+' new series will be added','','Merge only missing series and preserve existing progress?'].join('\n');
+        if(!confirm(preview))return;
+        if(!missingSeries.length){toast('No new series to import. Existing series and progress were left unchanged.');return;}
+        rememberDatabaseUndo('merge backup');
+        db.series.push(...missingSeries);
+        const newVideoIds=new Set();
+        for(const series of missingSeries){
+          for(const ep of series.episodes)if(/^[A-Za-z0-9_-]{11}$/.test(ep.id))newVideoIds.add(ep.id);
+          for(const id of [series.cursorVideoId,series.bookmarkVideoId])if(/^[A-Za-z0-9_-]{11}$/.test(String(id||'')))newVideoIds.add(id);
+        }
+        for(const [id,state] of Object.entries(restored.episodes||{}))if(newVideoIds.has(id)&&!Object.prototype.hasOwnProperty.call(db.episodes,id))db.episodes[id]={...state};
+        for(const [id,item] of Object.entries(restored.history||{}))if(!Object.prototype.hasOwnProperty.call(db.history,id))db.history[id]={...item};
+        db.lastSync=Math.max(Number(db.lastSync)||0,Number(restored.lastSync)||0);
+        saveDB();renderPanel();
+        toast('Imported '+missingSeries.length+' new series. Existing series and progress were preserved. Undo is available for 8 seconds.');
+      }catch(error){
+        console.warn('[YouTube Series] Backup import rejected:',error?.message||error);
+        toast('Could not import backup: '+(error?.message||'invalid file'));
+      }
+    };
     input.click();
+  }
+
+  function historyProgressPercent(node) {
+    if (!node) return null;
+    const selectors = [
+      'ytd-thumbnail-overlay-resume-playback-renderer #progress',
+      'ytd-thumbnail-overlay-resume-playback-renderer [style*="width"]',
+      '[aria-label*="watched"] [style*="width"]',
+      'yt-progress-bar[aria-valuenow]',
+      '[role="progressbar"][aria-valuenow]'
+    ];
+    for (const selector of selectors) {
+      const bar = node.querySelector(selector);
+      if (!bar) continue;
+      const aria = Number(bar.getAttribute('aria-valuenow'));
+      if (Number.isFinite(aria) && aria >= 0 && aria <= 100) return aria;
+      const width = /([0-9]+(?:\.[0-9]+)?)%/.exec(bar.getAttribute('style') || '');
+      if (width) return Math.max(0,Math.min(100,Number(width[1])));
+    }
+    return null;
   }
   function scanHistoryPage() {
     if (!location.pathname.startsWith('/feed/history')) { toast('Open youtube.com/feed/history first, then select Scan History.'); return; }
@@ -1461,11 +2213,41 @@
       try {
         const id=new URL(a.href,location.origin).searchParams.get('v');if(!id||!matched.has(id))continue;
         const title=text(node.querySelector('#video-title'))||a.title||stateFor(id).title;
-        db.history[id]={title,lastSeen:Date.now()};count++;
-        const st=stateFor(id);if(!isWatched(id))setState(id,{watched:true},false);
+        const percent = historyProgressPercent(node);
+        const previous = db.history[id] || {};
+        db.history[id] = {
+          title,
+          lastSeen: Date.now(),
+          percent,
+          signature: String(percent ?? '') + ':' + String(text(node.querySelector('#video-title')) || title)
+        };
+        count++;
+        if (db.settings.importHistoryProgress && percent !== null && shouldAutoCompletePercentage(percent, stateFor(id).duration || db.series.flatMap(series=>series.episodes).find(ep=>ep.id===id)?.duration || 0)) {
+          const state = stateFor(id);
+          if (state.completionOverride !== 'UNWATCHED' && state.completionOverride !== 'WATCHED') {
+            setState(id,{watched:true,completionOverride:'AUTO'},false);
+          }
+        }
       }catch(_){}
     }
     saveDB();renderPanel();toast(`History scan found ${count} tracked episode(s). Scroll down to load more history, then scan again.`);
+  }
+  function addHistorySwitcher() {
+    const onHistory = location.pathname.startsWith('/feed/history');
+    const existing = document.getElementById('yst2-history-switcher');
+    if (db.settings.enabled === false || !onHistory) { existing?.remove(); return; }
+    const host = document.querySelector('ytd-browse[page-subtype="history"] #header')
+      || document.querySelector('ytd-browse[page-subtype="history"] #primary')
+      || document.querySelector('ytd-browse[page-subtype="history"]');
+    if (!host) return;
+    if (existing && existing.parentElement === host) return;
+    existing?.remove();
+    const nav = document.createElement('div');
+    nav.id = 'yst2-history-switcher';
+    nav.setAttribute('role','tablist');
+    nav.innerHTML = '<button type="button" role="tab" aria-selected="true">Watch History</button><button type="button" role="tab" aria-selected="false">Series</button>';
+    nav.querySelectorAll('button')[1].addEventListener('click', () => { activeTab='library'; openPanel(); });
+    host.insertBefore(nav, host.firstChild);
   }
   function addSidebarButton() {
     let button = document.getElementById(BTN);
@@ -1500,13 +2282,64 @@
       button.classList.add('floating');
     }
   }
+  function addPlaylistFollowButton() {
+    if (db.settings.enabled === false) { document.getElementById(PLAYLIST_BTN)?.remove(); return; }
+    const listId=getPlaylistId();
+    const onPlaylist=location.pathname==='/playlist'||location.pathname.startsWith('/playlist');
+    const host=document.querySelector('ytd-playlist-header-renderer #top-level-buttons-computed')
+      || document.querySelector('ytd-playlist-header-renderer #actions')
+      || document.querySelector('ytd-playlist-header-renderer #primary');
+    const existing=document.getElementById(PLAYLIST_BTN);
+    if(!onPlaylist||!isSuggestiblePlaylistId(listId)||!host){existing?.remove();return;}
+    const followed=findSeries(listId);
+    if(existing&&existing.parentElement===host){
+      existing.textContent=followed?'View series':'Follow series';
+      existing.dataset.playlist=listId;
+      return;
+    }
+    existing?.remove();
+    const button=document.createElement('button');
+    button.type='button';button.id=PLAYLIST_BTN;
+    button.className='yt-spec-button-shape-next yt-spec-button-shape-next--tonal yt-spec-button-shape-next--mono';
+    button.textContent=followed?'View series':'Follow series';
+    button.title='Open or follow this playlist as a series';
+    button.dataset.playlist=listId;
+    button.addEventListener('click',async()=>{
+      const id=button.dataset.playlist;
+      const saved=findSeries(id);
+      if(saved){showSeriesInLibrary(saved);return;}
+      if(getPlaylistId()!==id){toast('Playlist changed. Refresh the page and try again.');return;}
+      await syncCurrentPlaylist();
+      const newlySaved=findSeries(id);
+      if(newlySaved)showSeriesInLibrary(newlySaved);
+    });
+    host.appendChild(button);
+  }
+
   function addPlayerButton() {
+    if (db.settings.enabled === false) { document.getElementById(PLAYER_BTN)?.remove(); document.getElementById(PLAYER_PREV_BTN)?.remove(); document.getElementById(PLAYER_NEXT_BTN)?.remove(); return; }
     const player = document.querySelector('#movie_player');
     if (!player) return;
     const host = player.querySelector('.ytp-chrome-top-buttons')
       || player.querySelector('.ytp-right-controls');
     if (!host) return;
-
+    if (db.settings.showPlayerButton === false) {
+      document.getElementById(PLAYER_BTN)?.remove();
+      document.getElementById(PLAYER_PREV_BTN)?.remove();
+      document.getElementById(PLAYER_NEXT_BTN)?.remove();
+      return;
+    }
+    const addNav=(id,label,glyph,direction)=>{
+      let nav=document.getElementById(id);
+      if(nav&&nav.parentElement===host)return;
+      nav?.remove();
+      nav=document.createElement('button');nav.type='button';nav.id=id;nav.className='ytp-button';
+      nav.title=label;nav.setAttribute('aria-label',label);nav.textContent=glyph;
+      nav.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();navigateSeries(direction);});
+      host.appendChild(nav);
+    };
+    addNav(PLAYER_PREV_BTN,'Previous series episode','‹',-1);
+    addNav(PLAYER_NEXT_BTN,'Next series episode','›',1);
     let button = document.getElementById(PLAYER_BTN);
     if (button && button.parentElement === host) return;
     if (button) button.remove();
@@ -1550,28 +2383,106 @@
     const requestedOrder = series && series.playlistId && getPlaylistId() === series.playlistId
       ? currentPlaylistIndex() : -1;
     const episode = episodeOccurrence(series, videoId, requestedOrder);
-    if (!episode) return;
+    if (!episode) {
+      if (series?.bookmarkVideoId === videoId) {
+        const video = document.querySelector('video'), old = stateFor(videoId);
+        const duration = Number.isFinite(video?.duration) && video.duration > 0 ? video.duration : old.duration || 0;
+        const position = Number.isFinite(video?.currentTime) && video.currentTime > 0 ? video.currentTime : old.position || 0;
+        if (db.settings.recordPlaybackProgress !== false) {
+          const watched = old.completionOverride === 'WATCHED' || (old.completionOverride !== 'UNWATCHED' && (old.watched || shouldAutoComplete(position,duration,Number(db.settings.watchedThreshold),Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS),Boolean(video?.ended))));
+          setState(videoId,{title:old.title || videoTitle(),position:watched?(duration||position):position,duration:duration||old.duration,watched},false);
+          db.history[videoId]={title:old.title || videoTitle(),lastSeen:Date.now()};
+        }
+        series.cursorVideoId=videoId;series.cursorOrder=-1;series.cursorUpdatedAt=Date.now();
+        return;
+      }
+      return;
+    }
     const video = document.querySelector('video');
     const old = stateFor(videoId);
     const duration = Number.isFinite(video && video.duration) && video.duration > 0 ? video.duration : episode.duration || old.duration || 0;
     const position = Number.isFinite(video && video.currentTime) && video.currentTime > 0 ? video.currentTime : old.position || 0;
     const threshold = Number(db.settings.watchedThreshold);
     const watched = old.completionOverride === 'WATCHED' || (old.completionOverride !== 'UNWATCHED' && (old.watched || shouldAutoComplete(position,duration,threshold,Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS),Boolean(video && video.ended))));
-    setState(videoId, {
-      title: episode.title || old.title,
-      position: watched ? (duration || position) : position,
-      duration: duration || old.duration,
-      watched
-    }, false);
+    if (db.settings.recordPlaybackProgress !== false) {
+      setState(videoId, {
+        title: episode.title || old.title,
+        position: watched ? (duration || position) : position,
+        duration: duration || old.duration,
+        watched
+      }, false);
+      db.history[videoId] = { title: episode.title || old.title, lastSeen: Date.now() };
+    }
     series.cursorVideoId = videoId;
     series.cursorOrder = episode.order;
     series.cursorUpdatedAt = Date.now();
-    db.history[videoId] = { title: episode.title || old.title, lastSeen: Date.now() };
+    series.cursorRevision = Number(series.catalogRevision) || 0;
   }
-  function finishAutoFollow(candidate, videoId) {
+  function showFollowSetupDialog(candidate, videoId) {
+    if (!candidate || getVideoId() !== videoId) return;
+    const panel = document.getElementById(PANEL);
+    if (!panel) return;
+    panel.querySelector('#yst2-follow-setup')?.remove();
+    const catalog = [...candidate.items].sort((a,b)=>(a.order??0)-(b.order??0));
+    const reverseDefault = typeof candidate.reverse === 'boolean' ? candidate.reverse : inferReverseOrder(catalog);
+    const requestedOrder = candidate.id === getPlaylistId() ? currentPlaylistIndex() : -1;
+    const index = catalog.findIndex(ep => ep.id === videoId && ep.available !== false && !ep.unavailable && (requestedOrder < 0 || ep.order === requestedOrder));
+    if (index < 0) { toast('The selected playlist does not contain the current video.'); return; }
+    const previousCount = reverseDefault ? catalog.length - index - 1 : index;
+    const video = document.querySelector('video');
+    const position = Number.isFinite(video?.currentTime) ? Math.max(0,video.currentTime) : 0;
+    const modal = document.createElement('div');
+    modal.id = 'yst2-follow-setup';
+    modal.className = 'yst2-modal-backdrop';
+    modal.innerHTML = '<section class="yst2-modal" role="dialog" aria-modal="true" aria-labelledby="yst2-follow-setup-title">'
+      + '<header class="yst2-modal-head"><div><h3 id="yst2-follow-setup-title">Follow this series</h3><p class="yst2-muted">' + esc(candidate.title || 'YouTube playlist') + '</p></div><button class="yst2-icon" data-close aria-label="Close">×</button></header>'
+      + '<label class="yst2-dialog-label" for="yst2-follow-order">Episode playback order</label>'
+      + '<select id="yst2-follow-order" class="yst2-dialog-select"><option value="playlist"' + (!reverseDefault?' selected':'') + '>YouTube playlist order</option><option value="reverse"' + (reverseDefault?' selected':'') + '>Reverse playlist order</option></select>'
+      + '<div class="yst2-current-video"><img src="' + esc(candidate.thumb || 'https://i.ytimg.com/vi/'+videoId+'/hqdefault.jpg') + '" alt=""><div><strong>' + esc(currentVideoDetails(videoId).title || videoTitle()) + '</strong><span>' + (position > 1 ? 'Resume from ' + fmt(position) : 'Current episode') + '</span></div></div>'
+      + '<label class="yst2-setting"><input id="yst2-follow-watch-previous" type="checkbox" ' + (previousCount>0?'':'disabled') + '> Mark the ' + previousCount + ' earlier episode(s) as watched</label>'
+      + '<p class="yst2-muted">The current episode position is saved locally. YouTube History is not changed.</p>'
+      + '<button type="button" id="yst2-follow-save" class="yst2-mainbtn">Follow series</button><button type="button" class="yst2-subbtn" data-close>Cancel</button></section>';
+    panel.appendChild(modal);
+    modal.querySelector('#yst2-follow-order')?.addEventListener('change',event=>{
+      const reverse=event.target.value==='reverse';
+      const count=reverse?catalog.length-index-1:index;
+      const checkbox=modal.querySelector('#yst2-follow-watch-previous');
+      checkbox.disabled=count<=0;
+      if(count<=0)checkbox.checked=false;
+      checkbox.parentElement.lastChild.textContent=' Mark the '+count+' earlier episode(s) as watched';
+    });
+    modal.querySelector('#yst2-follow-save')?.addEventListener('click',()=>{
+      if(getVideoId()!==videoId){modal.remove();toast('The active video changed. Tap Follow again.');return;}
+      const reverse=modal.querySelector('#yst2-follow-order')?.value==='reverse';
+      const watchPrevious=Boolean(modal.querySelector('#yst2-follow-watch-previous')?.checked);
+      modal.remove();
+      finishAutoFollow(candidate,videoId,{reverse,watchPrevious});
+    });
+    modal.querySelectorAll('[data-close]').forEach(button=>button.addEventListener('click',()=>modal.remove()));
+    modal.addEventListener('click',event=>{if(event.target===modal)modal.remove();});
+    modal.addEventListener('keydown',event=>{if(event.key==='Escape')modal.remove();});
+  }
+
+  function finishAutoFollow(candidate, videoId, options = {}) {
     const series = mergeSeries(candidate.id, candidate.title || seriesSearchTitle(currentVideoDetails(videoId).title) || candidate.id, candidate.items);
-    if (typeof series.playbackReverse !== 'boolean') {
-      series.playbackReverse = typeof candidate.reverse === 'boolean' ? candidate.reverse : inferReverseOrder(candidate.items);
+    const reverse = typeof options.reverse === 'boolean'
+      ? options.reverse
+      : (typeof candidate.reverse === 'boolean' ? candidate.reverse : inferReverseOrder(candidate.items));
+    series.playbackReverse = reverse;
+    const ordered = [...series.episodes].sort((a,b)=>(a.order??0)-(b.order??0));
+    if (reverse) ordered.reverse();
+    const requestedOrder = candidate.id===getPlaylistId()?currentPlaylistIndex():-1;
+    const startIndex = ordered.findIndex(ep=>ep.id===videoId&&ep.available!==false&&!ep.unavailable&&(requestedOrder<0||ep.order===requestedOrder));
+    if (options.watchPrevious && startIndex>0) {
+      const preceding=ordered.slice(0,startIndex).filter(ep=>ep.available!==false&&!ep.unavailable&&/^[A-Za-z0-9_-]{11}$/.test(ep.id));
+      rememberUndo(preceding.map(ep=>ep.id),'follow series and mark previous episodes watched');
+      const now=Date.now();
+      for(const ep of preceding){
+        const old=stateFor(ep.id),already=isWatched(ep.id);
+        db.episodes[ep.id]={...old,watched:true,completionOverride:'WATCHED',
+          position:old.duration||ep.duration||old.position,duration:old.duration||ep.duration||0,
+          updatedAt:now,lastWatchedAt:already?old.lastWatchedAt:now};
+      }
     }
     recordCurrentProgressInSeries(series, videoId);
     saveDB();
@@ -1607,7 +2518,7 @@
     modal.querySelectorAll('[data-follow-candidate]').forEach(button => {
       button.addEventListener('click', () => {
         const candidate = candidates[Number(button.dataset.followCandidate)];
-        if (candidate && getVideoId() === videoId) finishAutoFollow(candidate, videoId);
+        if (candidate && getVideoId() === videoId) showFollowSetupDialog(candidate, videoId);
         modal.remove();
       });
     });
@@ -1661,6 +2572,7 @@
   }
 
   async function followSeriesFromPlayer() {
+    if (db.settings.enabled === false) { activeTab='settings'; openPanel(); toast('Enable Series Tracker in Settings first.'); return; }
     if (playerActionBusy) return;
     const videoId = getVideoId();
     const rawList = getPlaylistId();
@@ -1710,7 +2622,7 @@
         try {
           const catalog = await fetchFullPlaylist(listId);
           if (getVideoId() === capturedVideo && catalog.items.some(item => item.id === capturedVideo && item.available !== false && !item.unavailable)) {
-            finishAutoFollow({
+            showFollowSetupDialog({
               id: listId,
               title: catalog.title || playlistTitleFromDOM() || seriesSearchTitle(currentVideoDetails(capturedVideo).title) || currentVideoDetails(capturedVideo).title || listId,
               items: catalog.items,
@@ -1726,10 +2638,10 @@
       const matches = await discoverPlaylistsForVideo(capturedVideo);
       if (getVideoId() !== capturedVideo) return;
       if (matches.length === 1) {
-        finishAutoFollow(matches[0], capturedVideo);
+        showFollowSetupDialog(matches[0], capturedVideo);
       } else if (matches.length > 1) {
         const first = matches[0], second = matches[1];
-        if (first.score >= 100 && first.score - second.score >= 50) finishAutoFollow(first, capturedVideo);
+        if (first.score >= 100 && first.score - second.score >= 50) showFollowSetupDialog(first, capturedVideo);
         else showPlaylistCandidateDialog(capturedVideo, matches);
       } else {
         activeTab = 'library';
@@ -1760,8 +2672,10 @@
     if(!document.getElementById(PANEL)){const p=document.createElement('aside');p.id=PANEL;document.body.appendChild(p);}
     addSidebarButton();
     addPlayerButton();
+    addPlaylistFollowButton();
+    addHistorySwitcher();
   }
-  function openPanel(){document.getElementById(PANEL)?.classList.add('open');renderPanel();}
+  function openPanel(){if(db.settings.enabled===false)activeTab='settings';document.getElementById(PANEL)?.classList.add('open');renderPanel();}
   function closePanel(){document.getElementById(PANEL)?.classList.remove('open');}
   function togglePanel(){document.getElementById(PANEL)?.classList.contains('open')?closePanel():openPanel();}
   function toast(message) {
@@ -1807,7 +2721,7 @@
       #${BTN}{display:flex;align-items:center;gap:20px;width:100%;padding:10px 12px;border:0;border-radius:10px;background:transparent;color:var(--yt-spec-text-primary,#f1f1f1);font:500 14px Roboto,Arial,sans-serif;cursor:pointer}
       #${BTN}:hover{background:var(--yt-spec-10-percent-layer,#272727)}#${BTN} svg{width:24px;height:24px;fill:currentColor;flex:none}
       #${BTN}.floating{position:fixed;z-index:999990;left:12px;bottom:18px;width:auto;background:#ff1744;color:white;border-radius:22px;padding:10px 15px;box-shadow:0 5px 20px #0007}
-      #${PLAYER_BTN}{display:inline-flex!important;align-items:center;justify-content:center;width:48px;height:48px;padding:0;margin:0;border:0;background:transparent;color:#f1f1f1;cursor:pointer;flex:0 0 48px;vertical-align:top}
+      #${PLAYLIST_BTN}{margin:8px!important;border-radius:9px!important;padding:0 13px!important;min-height:36px!important;font-size:12px!important}#${PLAYER_PREV_BTN},#${PLAYER_NEXT_BTN}{display:inline-flex!important;align-items:center;justify-content:center;width:30px;height:40px;border:0;background:transparent;color:#f2f2f2;cursor:pointer;font-size:21px;vertical-align:top}#${PLAYER_PREV_BTN}:hover,#${PLAYER_NEXT_BTN}:hover{opacity:.72}#${PLAYER_BTN}{display:inline-flex!important;align-items:center;justify-content:center;width:48px;height:48px;padding:0;margin:0;border:0;background:transparent;color:#f1f1f1;cursor:pointer;flex:0 0 48px;vertical-align:top}
       #${PLAYER_BTN} svg{display:block;width:24px;height:24px;fill:currentColor}
       #${PLAYER_BTN}:hover{opacity:.82}
       #${PLAYER_BTN}:focus-visible{outline:2px solid #fff;outline-offset:-4px;border-radius:8px}
@@ -1847,7 +2761,7 @@
       .yst2-series-art>span{position:absolute;bottom:6px;left:7px;z-index:1;padding:3px 6px;border-radius:5px;background:#0d0e12d9;color:#fff;font-size:9px;font-weight:700}
       .yst2-series-art-placeholder{font-size:24px;color:#ff536f}.yst2-series-info{flex:1;min-width:0}
       .yst2-serieshead{gap:4px;margin-bottom:7px}.yst2-seriestitle{font-size:14px;line-height:1.35;font-weight:750;letter-spacing:-.15px}
-      .yst2-serieshead .yst2-icon{width:27px;height:27px;flex:none;padding:0;border:1px solid #353843;color:#b5bac8;font-size:15px;line-height:1}
+      .yst2-new-count{border:1px solid #754052;border-radius:7px;background:#3a202c;color:#ffb2c1;padding:4px 6px;font-size:9px;font-weight:700;white-space:nowrap}.yst2-serieshead .yst2-icon{width:27px;height:27px;flex:none;padding:0;border:1px solid #353843;color:#b5bac8;font-size:15px;line-height:1}
       .yst2-serieshead .yst2-icon.danger{color:#f18b9e}.yst2-muted{color:#999eac;font-size:10px;line-height:1.5}.yst2-dot{padding:0 3px;color:#666b79}
       .yst2-series-footline{display:flex;align-items:center;justify-content:space-between;gap:7px;font-size:10px;color:#8e94a3}.yst2-progress-label{color:#ffc0cb;font-weight:700}
       .yst2-continue{display:flex;align-items:center;gap:10px;margin-top:10px;padding:9px 10px;border:1px solid #4c2936;background:#2b1b26;color:#fff;border-radius:10px;text-align:left;white-space:normal;overflow:visible;text-overflow:clip}
@@ -1883,6 +2797,7 @@
     `;document.head.appendChild(st);
   }
   function trackCurrentVideo() {
+    if (db.settings.enabled === false) { if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;} currentVideoId='';activeVideo=null;activePlaybackSession=null;return; }
     const meta=videoMeta(), video=document.querySelector('video');
     if(!meta||!video){
       if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;}
@@ -1898,20 +2813,22 @@
     const listSeries=list?findSeries(list):undefined;
     const listOrder=listSeries && listSeries.playlistId===list?currentPlaylistIndex():-1;
     const listedOccurrence=listSeries?episodeOccurrence(listSeries,meta.id,listOrder):null;
-    const s=listedOccurrence?listSeries:db.series.find(x=>episodeOccurrence(x,meta.id,x.playlistId===list?listOrder:-1));
+    const s=listedOccurrence?listSeries:(db.series.find(x=>episodeOccurrence(x,meta.id,x.playlistId===list?listOrder:-1)) || db.series.find(x=>x.bookmarkVideoId===meta.id));
     const currentOccurrence=s?episodeOccurrence(s,meta.id,s.playlistId===list?listOrder:-1):null;
     if(s&&currentOccurrence){
+      activePlaybackSession={seriesId:s.id,videoId:meta.id,order:currentOccurrence.order,catalogRevision:Number(s.catalogRevision)||0};
       s.cursorVideoId=meta.id;
       s.cursorOrder=currentOccurrence.order;
       s.cursorUpdatedAt=Date.now();
     }
     const savePosition=()=>{
-      if(!Number.isFinite(video.currentTime))return;
-      const dur=Number.isFinite(video.duration)?video.duration:meta.duration;
+      if(db.settings.recordPlaybackProgress===false||!s||location.pathname.startsWith('/shorts/'))return;
+      if(!Number.isFinite(video.currentTime)||!Number.isFinite(video.duration)||video.duration<=0||video.duration>604800)return;
+      const dur=video.duration;
       const old=stateFor(meta.id), threshold=Number(db.settings.watchedThreshold);
       const watched=old.completionOverride === 'WATCHED' || (old.completionOverride !== 'UNWATCHED' && (old.watched || shouldAutoComplete(video.currentTime,dur,threshold,Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS),video.ended)));
       setState(meta.id,{title:meta.title||old.title,position:watched?(dur||video.currentTime):video.currentTime,duration:dur||old.duration,watched},false);
-      if(s) db.history[meta.id]={title:meta.title,lastSeen:Date.now()};
+      if(s&&db.settings.recordPlaybackProgress!==false) db.history[meta.id]={title:meta.title,lastSeen:Date.now()};
       saveDB();
       if(document.getElementById(PANEL)?.classList.contains('open')&&Date.now()-lastPanelRender>1800){lastPanelRender=Date.now();renderPanel();}
     };
@@ -1920,8 +2837,10 @@
     video.addEventListener('loadedmetadata',savePosition,{once:true});
     video.addEventListener('pause',savePosition);
     const onEnded=()=>{
-      const previous = stateFor(meta.id);
-      setState(meta.id,{title:meta.title,position:video.duration||meta.duration,duration:video.duration||meta.duration,watched:previous.completionOverride !== 'UNWATCHED'},false);
+      const previous=stateFor(meta.id);
+      if(db.settings.recordPlaybackProgress!==false&&s&&previous.completionOverride!=='UNWATCHED'){
+        setState(meta.id,{title:meta.title,position:video.duration||meta.duration,duration:video.duration||meta.duration,watched:true},false);
+      }
       if(s) db.history[meta.id]={title:meta.title,lastSeen:Date.now()};
       saveDB();
       if(db.settings.autoNext && s && isWatched(meta.id)) {
@@ -1940,7 +2859,7 @@
       video.removeEventListener('pause',savePosition);
       video.removeEventListener('ended',onEnded);
     };
-    if(s){db.history[meta.id]={title:meta.title,lastSeen:Date.now()};saveDB();}
+    if(s&&db.settings.recordPlaybackProgress!==false){db.history[meta.id]={title:meta.title,lastSeen:Date.now()};saveDB();}
   }
   function routeChanged() {
     clearTimeout(routeTimer);
@@ -1953,12 +2872,16 @@
         if(s && Date.now()-last>15*60*1000){sessionStorage.setItem(AUTO_SYNC_KEY,String(Date.now()));syncCurrentPlaylist();}
       }
       if(location.pathname.startsWith('/feed/history')&&db.settings.historyScan) scanHistoryPage();
+      if(staleRefreshTimer)clearTimeout(staleRefreshTimer);
+      staleRefreshTimer=setTimeout(refreshStaleSeries,1200);
     },450);
   }
   function observeSidebar() {
     const mo=new MutationObserver(()=>{
-      if(!document.getElementById(BTN)) addSidebarButton();
+      if(db.settings.showSidebarButton!==false&&!document.getElementById(BTN)) addSidebarButton();
       addPlayerButton();
+      addPlaylistFollowButton();
+      addHistorySwitcher();
     });
     mo.observe(document.documentElement,{childList:true,subtree:true});
   }
@@ -1971,8 +2894,9 @@
     if(tickTimer)clearInterval(tickTimer);
     tickTimer=setInterval(()=>{
       if(getVideoId() && (getVideoId()!==currentVideoId || document.querySelector('video')!==activeVideo))trackCurrentVideo();
-      if(!document.getElementById(BTN)) addSidebarButton();
+      if(db.settings.showSidebarButton!==false&&!document.getElementById(BTN)) addSidebarButton();
       addPlayerButton();
+      addPlaylistFollowButton();
     },1500);
   }
   boot();
