@@ -2294,6 +2294,141 @@
     }
     return null;
   }
+
+  let historySyncBusy = false;
+  let historySyncLastAt = 0;
+  function historyApiRows(data) {
+    const rows = new Map();
+    let continuation = '';
+    walk(data, node => {
+      if (!node || typeof node !== 'object') return;
+      const renderer = node.videoRenderer || node.gridVideoRenderer;
+      if (renderer && /^[A-Za-z0-9_-]{11}$/.test(String(renderer.videoId || ''))) {
+        let percent = null;
+        for (const overlay of renderer.thumbnailOverlays || []) {
+          const bar = overlay?.thumbnailOverlayProgressBarRenderer;
+          const value = Number(bar?.percentDurationWatched);
+          if (Number.isFinite(value) && value >= 0 && value <= 100) percent = value;
+        }
+        const duration = parseDuration(renderer.lengthText?.simpleText || renderer.lengthText?.runs?.map(run=>run.text).join('') || '');
+        rows.set(renderer.videoId, {
+          id: renderer.videoId,
+          title: rendererText(renderer.title) || '',
+          percent,
+          duration,
+          signature: String(percent ?? '') + ':' + String(duration || 0)
+        });
+      }
+      if (!continuation && node.nextContinuationData?.continuation) continuation = String(node.nextContinuationData.continuation);
+      if (!continuation && node.continuationCommand?.token) continuation = String(node.continuationCommand.token);
+    });
+    return { rows, continuation };
+  }
+  async function fetchHistoryApiPage(continuation) {
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error('YouTube History API key is unavailable on this page.');
+    const context = getClientContext();
+    const client = context?.client || {};
+    const version = String(client.clientVersion || '');
+    if (!version) throw new Error('YouTube client context is unavailable.');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    try {
+      const response = await fetch('/youtubei/v1/browse?key=' + encodeURIComponent(apiKey) + '&prettyPrint=false', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-YouTube-Client-Name': '1',
+          'X-YouTube-Client-Version': version
+        },
+        body: JSON.stringify(continuation ? { context, continuation } : { context, browseId: 'FEhistory' }),
+        signal: controller.signal
+      });
+      if (!response.ok) throw new Error('YouTube History request failed (HTTP ' + response.status + ').');
+      const body = await response.text();
+      if (body.length > 8 * 1024 * 1024) throw new Error('YouTube History response exceeded the 8 MB safety limit.');
+      return historyApiRows(JSON.parse(body));
+    } finally { clearTimeout(timeout); }
+  }
+  async function syncYouTubeHistory(force = false) {
+    if (historySyncBusy || !syncAllowed()) return;
+    if (!force && historySyncLastAt && Date.now() - historySyncLastAt < 5 * 60 * 1000) return;
+    historySyncBusy = true;
+    const initialGeneration = privacyGeneration;
+    const initialAccount = activeAccountDigest;
+    let changed = false, imported = 0, pages = 0;
+    try {
+      const known = new Map();
+      for (const series of db.series) {
+        for (const episode of series.episodes || []) {
+          if (episode.available === false || episode.unavailable || !/^[A-Za-z0-9_-]{11}$/.test(episode.id)) continue;
+          known.set(episode.id, Math.max(known.get(episode.id) || 0, Number(episode.duration) || Number(stateFor(episode.id).duration) || 0));
+        }
+        if (/^[A-Za-z0-9_-]{11}$/.test(String(series.bookmarkVideoId || ''))) {
+          const id = series.bookmarkVideoId;
+          known.set(id, Math.max(known.get(id) || 0, Number(stateFor(id).duration) || 0));
+        }
+      }
+      if (!known.size) { toast('Follow a series before syncing its History progress.'); return; }
+      const baselines = historyAccountState();
+      if (!baselines) throw new Error('The active YouTube account could not be identified.');
+      let token = '';
+      const maxPages = force ? 3 : 1;
+      for (let page = 0; page < maxPages; page++) {
+        await refreshAccountContext();
+        if (initialGeneration !== privacyGeneration || initialAccount !== activeAccountDigest || !syncAllowed()) throw new Error('YouTube account changed; History sync was stopped.');
+        const result = await fetchHistoryApiPage(token);
+        pages++;
+        const observedAt = Date.now();
+        for (const [id, row] of result.rows) {
+          if (!known.has(id)) continue;
+          const previous = baselines[id];
+          const duration = known.get(id) || row.duration || Number(stateFor(id).duration) || 0;
+          const signature = row.signature;
+          const clearedAt = Number(privacy.clearedProgressAt[id]) || 0;
+          const unchanged = previous && previous.signature === signature;
+          if (!unchanged && row.percent !== null && duration > 0) {
+            const old = stateFor(id);
+            const localChangedAfterBaseline = previous && Number(old.updatedAt) > Number(previous.seenAt);
+            const clearedAfterBaseline = clearedAt > 0 && (!previous || clearedAt >= Number(previous.seenAt));
+            if (!localChangedAfterBaseline && !clearedAfterBaseline
+                && old.completionOverride !== 'WATCHED' && old.completionOverride !== 'UNWATCHED') {
+              const complete = shouldAutoCompletePercentage(row.percent, duration, Number(db.settings.watchedThreshold));
+              if (Boolean(old.watched) !== complete) {
+                setState(id, {
+                  title: row.title || old.title,
+                  watched: complete,
+                  completionOverride: 'AUTO',
+                  duration: old.duration || duration
+                }, false);
+                changed = true;
+                imported++;
+              }
+            }
+          }
+          if (!unchanged) {
+            baselines[id] = { signature, seenAt: observedAt };
+            changed = true;
+          }
+        }
+        token = result.continuation;
+        if (!token || pages >= maxPages) break;
+        let missing = false;
+        for (const id of known.keys()) if (!result.rows.has(id) && !baselines[id]) { missing = true; break; }
+        if (!missing) break;
+      }
+      await refreshAccountContext();
+      if (initialGeneration !== privacyGeneration || initialAccount !== activeAccountDigest || !syncAllowed()) throw new Error('YouTube account changed; History sync was stopped.');
+      if (changed) { savePrivacy(); saveDB(); if (document.getElementById(PANEL)?.classList.contains('open')) renderPanel(); }
+      historySyncLastAt = Date.now();
+      toast('YouTube History checked (' + pages + ' page' + (pages === 1 ? '' : 's') + '); ' + imported + ' completion update' + (imported === 1 ? '' : 's') + ' imported.');
+    } catch (error) {
+      console.warn('[YouTube Series] History sync failed', error);
+      toast(error?.name === 'AbortError' ? 'YouTube History sync timed out.' : (error.message || 'YouTube History sync failed.'));
+    } finally { historySyncBusy = false; }
+  }
+
   function scanHistoryPage(quiet = false) {
     if (db.settings.enabled === false || db.settings.historyScan === false) return 0;
     if (!location.pathname.startsWith('/feed/history')) {
