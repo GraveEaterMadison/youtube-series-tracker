@@ -1991,7 +1991,7 @@
     p.querySelectorAll('[data-play]').forEach(b=>b.addEventListener('click',()=>{if(b.disabled)return;const s=db.series.find(x=>x.id===b.dataset.sid),e=s?.episodes.find(x=>x.id===b.dataset.play);if(s&&e)openEpisode(s,e);}));
     p.querySelectorAll('[data-hide-watched]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.hideWatched);if(!s)return;s.hideWatched=!s.hideWatched;saveDB();renderPanel();toast(s.hideWatched?'Watched episodes hidden.':'Watched episodes shown.');}));
     p.querySelectorAll('[data-order]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.order);if(!s)return;s.playbackReverse=!s.playbackReverse;saveDB();renderPanel();toast('Episode order: '+(s.playbackReverse?'chronological':'playlist')+'.');}));
-    p.querySelectorAll('[data-continue]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.continue);const plan=s&&resumePlan(s);if(s&&plan?.episode){acknowledgeNewEpisodes(s.id);openEpisode(s,plan.episode);}}));
+    p.querySelectorAll('[data-continue]').forEach(b=>b.addEventListener('click',async()=>{let s=db.series.find(x=>x.id===b.dataset.continue);if(!s)return;if(syncAllowed())await syncYouTubeHistory(true,s.id);s=db.series.find(x=>x.id===b.dataset.continue);const plan=s&&resumePlan(s);if(s&&plan?.episode){acknowledgeNewEpisodes(s.id);openEpisode(s,plan.episode);}}));
     p.querySelectorAll('[data-recovery]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.recovery);if(s)showRecoveryChooser(s);}));
     p.querySelectorAll('[data-ack-new]').forEach(b=>b.addEventListener('click',()=>acknowledgeNewEpisodes(b.dataset.ackNew)));
     p.querySelectorAll('[data-open-playlist]').forEach(b=>b.addEventListener('click',()=>{const s=db.series.find(x=>x.id===b.dataset.openPlaylist);if(s?.playlistId)location.href='/playlist?list='+encodeURIComponent(s.playlistId);}));
@@ -2363,7 +2363,7 @@
       return historyApiRows(JSON.parse(body));
     } finally { clearTimeout(timeout); }
   }
-  async function syncYouTubeHistory(force = false) {
+  async function syncYouTubeHistory(force = false, selectedSeries = '') {
     if (historySyncBusy || !syncAllowed()) return;
     if (!force && historySyncLastAt && Date.now() - historySyncLastAt < 30 * 1000) return;
     historySyncBusy = true;
@@ -2374,6 +2374,7 @@
     try {
       const known = new Map();
       for (const series of db.series) {
+        if (selectedSeries && series.id !== selectedSeries) continue;
         for (const episode of series.episodes || []) {
           if (episode.available === false || episode.unavailable || !/^[A-Za-z0-9_-]{11}$/.test(episode.id)) continue;
           known.set(episode.id, Math.max(known.get(episode.id) || 0, Number(episode.duration) || Number(stateFor(episode.id).duration) || 0));
@@ -2387,7 +2388,7 @@
       const baselines = historyAccountState();
       if (!baselines) throw new Error('The active YouTube account could not be identified.');
       let token = '';
-      const maxPages = force ? 3 : 1;
+      const maxPages = force || selectedSeries ? 3 : 1;
       for (let page = 0; page < maxPages; page++) {
         await refreshAccountContext();
         if (initialGeneration !== privacyGeneration || initialAccount !== activeAccountDigest || !syncAllowed()) throw new Error('YouTube account changed; History sync was stopped.');
