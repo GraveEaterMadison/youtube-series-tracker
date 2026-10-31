@@ -119,6 +119,7 @@
       activePlaybackSession = null;
       lastSave = 0;
       if (document.getElementById(PANEL)?.classList.contains('open')) renderPanel();
+      if (location.pathname.startsWith('/feed/history') && syncAllowed()) syncYouTubeHistory(false);
       return activeAccountDigest;
     })();
     try { return await accountRefreshPromise; }
