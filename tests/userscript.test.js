@@ -755,6 +755,22 @@ test('History page gets a non-destructive Series entry point', () => {
 
 
 
+
+test('native YouTube player navigation follows an explicitly started Series session', () => {
+  assert.match(source, /const SERIES_SESSION_KEY = 'yst2-series-playback-session'/);
+  assert.match(source, /function readSeriesPlaybackSession\(\)/);
+  assert.match(source, /function writeSeriesPlaybackSession\(value\)/);
+  assert.match(source, /function clearSeriesPlaybackSession\(\)/);
+  assert.match(source, /function installNativeSeriesNavigation\(\)/);
+  assert.match(source, /#movie_player \.ytp-next-button, #movie_player \.ytp-prev-button/);
+  assert.match(source, /function handleOwnedSeriesRouteChange\(nextVideoId\)/);
+  assert.match(source, /if \(nextVideoId === expected\.id\)/);
+  assert.match(source, /writeSeriesPlaybackSession\(activePlaybackSession\)/);
+  assert.match(source, /navigateSeries\(direction, true\)/);
+  assert.match(source, /clearSeriesPlaybackSession\(\);routeChanged\(\)/);
+});
+
+
 test('playback checkpoints wait for advancing stable media and flush on pause or page hide', () => {
   assert.match(source, /let candidateAt=performance\.now\(\)/);
   assert.match(source, /now-candidateAt<500/);
