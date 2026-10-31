@@ -118,15 +118,17 @@
       privacyGeneration++;
       activePlaybackSession = null;
       lastSave = 0;
+      if (document.getElementById(PANEL)?.classList.contains('open')) renderPanel();
       return activeAccountDigest;
     })();
     try { return await accountRefreshPromise; }
     finally { accountRefreshPromise = null; }
   }
+  function accountConsentAllows(enabled, currentAccount, consentAccount) {
+    return Boolean(enabled && currentAccount && consentAccount && currentAccount === consentAccount);
+  }
   function recordingAllowed() {
-    return db.settings.recordPlaybackProgress === true
-      && Boolean(activeAccountDigest)
-      && privacy.consentAccount === activeAccountDigest;
+    return accountConsentAllows(db.settings.recordPlaybackProgress === true, activeAccountDigest, privacy.consentAccount);
   }
   function syncAllowed() {
     return db.settings.syncYouTubeProgress === true
@@ -1921,7 +1923,7 @@
       <label class="yst2-setting"><input type="checkbox" id="yst2-autosync" ${s.autoSyncOnOpen?'checked':''}> Automatically refresh the current tracked playlist when opened</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-sidebar" ${s.showSidebarButton!==false?'checked':''}> Show Series in YouTube navigation</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-player-visible" ${s.showPlayerButton!==false?'checked':''}> Show Series and previous/next controls in the player</label>
-      <label class="yst2-setting"><input type="checkbox" id="yst2-record-progress" ${s.recordPlaybackProgress?'checked':''}> Record local playback progress for followed episodes</label>
+      <label class="yst2-setting"><input type="checkbox" id="yst2-record-progress" ${recordingAllowed()?'checked':''}> Record local playback progress for followed episodes</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-import-history" ${s.importHistoryProgress?'checked':''}> Use visible History progress bars for completion</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-sync-youtube" ${syncAllowed()?'checked':''}> Sync progress from this YouTube account's History</label>
       <button id="yst2-sync-history-now" class="yst2-subbtn">Sync YouTube History now</button>
@@ -2415,7 +2417,7 @@
         token = result.continuation;
         if (!token || pages >= maxPages) break;
         let missing = false;
-        for (const id of known.keys()) if (!result.rows.has(id) && !baselines[id]) { missing = true; break; }
+        for (const id of known.keys()) if (!result.rows.has(id)) { missing = true; break; }
         if (!missing) break;
       }
       await refreshAccountContext();
@@ -3206,7 +3208,9 @@
     mo.observe(document.documentElement,{childList:true,subtree:true});
   }
   function boot() {
-    ensureUI();routeChanged();
+    ensureUI();
+    refreshAccountContext().then(()=>{if(location.pathname.startsWith('/feed/history')&&syncAllowed())syncYouTubeHistory(false);}).catch(()=>{});
+    routeChanged();
     document.addEventListener('yt-navigate-finish',routeChanged);
     window.addEventListener('popstate',routeChanged);
     observeSidebar();
