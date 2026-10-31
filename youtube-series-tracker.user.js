@@ -1419,7 +1419,10 @@
     activePlaybackSession = {seriesId:s.id,videoId:e.id,order:e.order,catalogRevision:Number(s.catalogRevision)||0};
     writeSeriesPlaybackSession(activePlaybackSession);
     saveDB();
-    location.href = urlFor(e.id, s.playlistId, s.playlistId ? e.order : undefined, resume && !startsHere && !isWatched(e.id) ? st.position : 0);
+    const startAt=resume&&!startsHere&&!isWatched(e.id)?Math.max(0,Number(st.position)||0):0;
+    const destination=new URL(urlFor(e.id,s.playlistId,s.playlistId?e.order:undefined,startAt),location.origin);
+    destination.searchParams.set('t',Math.floor(startAt)+'s');
+    location.href=destination.toString();
   }
   function setSeriesStartHere(series, episode) {
     if (!series || !episode || episode.available === false || episode.unavailable || !/^[A-Za-z0-9_-]{11}$/.test(episode.id)) return false;
