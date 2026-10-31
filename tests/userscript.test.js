@@ -794,7 +794,7 @@ test('recording consent is bound to a known active YouTube account', () => {
   assert.match(source, /function accountIdentitySource\(\)/);
   assert.match(source, /DATASYNC_ID/);
   assert.match(source, /crypto\.subtle\.digest\('SHA-256'/);
-  assert.match(source, /accountConsentAllows\\(db\\.settings\\.recordPlaybackProgress === true, activeAccountDigest, privacy\\.consentAccount\\)/);
+  assert.match(source, /accountConsentAllows\(db\.settings\.recordPlaybackProgress === true, activeAccountDigest, privacy\.consentAccount\)/);
 });
 
 test('YouTube History sync is separate opt-in and account-scoped', () => {
