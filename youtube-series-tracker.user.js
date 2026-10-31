@@ -1396,7 +1396,7 @@
     }
     if(!series){if(nativeOwned)return true;toast('This video is not in a followed series.');return false;}
     if(nativeOwned&&(!activePlaybackSession||activePlaybackSession.videoId!==videoId))return false;
-    const requestedOrder=series.playlistId===listId?currentPlaylistIndex():-1;
+    const requestedOrder=activePlaybackSession?.videoId===videoId?activePlaybackSession.order:(series.playlistId===listId?currentPlaylistIndex():-1);
     const occurrence=episodeOccurrence(series,videoId,requestedOrder);
     if(!occurrence){toast('Could not identify this episode occurrence.');return nativeOwned;}
     const episodes=orderedEpisodes(series).filter(ep=>ep.available!==false&&!ep.unavailable&&/^[A-Za-z0-9_-]{11}$/.test(ep.id));
@@ -2012,9 +2012,9 @@
     p.querySelector('#yst2-historyscan')?.addEventListener('change',e=>{db.settings.historyScan=e.target.checked;saveDB();observeHistoryPage();});
     p.querySelector('#yst2-sidebar')?.addEventListener('change',e=>{db.settings.showSidebarButton=e.target.checked;saveDB();addSidebarButton();});
     p.querySelector('#yst2-player-visible')?.addEventListener('change',e=>{db.settings.showPlayerButton=e.target.checked;saveDB();addPlayerButton();});
-    p.querySelector('#yst2-record-progress')?.addEventListener('change',async e=>{const enabled=e.target.checked;if(!enabled){db.settings.recordPlaybackProgress=false;privacy.consentAccount='';savePrivacy();saveDB();activePlaybackSession=null;privacyGeneration++;return;}e.target.disabled=true;try{const digest=await refreshAccountContext();if(!digest){e.target.checked=false;toast('Sign in to YouTube before enabling account-bound progress recording.');return;}if(!confirm('Enable local playback recording for this YouTube account? Progress stays in this browser. It is disabled automatically when the active account changes; no account identifier is stored or sent.')){e.target.checked=false;return;}privacy.consentAccount=digest;savePrivacy();db.settings.recordPlaybackProgress=true;saveDB();privacyGeneration++;toast('Playback recording enabled for this account.');}finally{e.target.disabled=false;}});
+    p.querySelector('#yst2-record-progress')?.addEventListener('change',async e=>{const enabled=e.target.checked;if(!enabled){db.settings.recordPlaybackProgress=false;privacy.consentAccount='';savePrivacy();saveDB();clearSeriesPlaybackSession();privacyGeneration++;return;}e.target.disabled=true;try{const digest=await refreshAccountContext();if(!digest){e.target.checked=false;toast('Sign in to YouTube before enabling account-bound progress recording.');return;}if(!confirm('Enable local playback recording for this YouTube account? Progress stays in this browser. It is disabled automatically when the active account changes; no account identifier is stored or sent.')){e.target.checked=false;return;}privacy.consentAccount=digest;savePrivacy();db.settings.recordPlaybackProgress=true;saveDB();privacyGeneration++;toast('Playback recording enabled for this account.');}finally{e.target.disabled=false;}});
     p.querySelector('#yst2-import-history')?.addEventListener('change',e=>{db.settings.importHistoryProgress=e.target.checked;saveDB();if(location.pathname.startsWith('/feed/history'))scanHistoryPage(true);});
-    p.querySelector('#yst2-sync-youtube')?.addEventListener('change',async e=>{const enabled=e.target.checked;if(!enabled){db.settings.syncYouTubeProgress=false;privacy.syncAccount='';savePrivacy();saveDB();privacyGeneration++;return;}e.target.disabled=true;try{const digest=await refreshAccountContext();if(!digest){e.target.checked=false;toast('Sign in to YouTube before enabling History sync.');return;}if(!confirm('Allow this tracker to read your YouTube History for followed episodes on this account? Only matching episode progress is stored locally; no account identifier or progress is sent to a third party.')){e.target.checked=false;return;}privacy.syncAccount=digest;savePrivacy();db.settings.syncYouTubeProgress=true;saveDB();privacyGeneration++;syncYouTubeHistory(true);}finally{e.target.disabled=false;}});
+    p.querySelector('#yst2-sync-youtube')?.addEventListener('change',async e=>{const enabled=e.target.checked;if(!enabled){db.settings.syncYouTubeProgress=false;privacy.syncAccount='';savePrivacy();saveDB();return;}e.target.disabled=true;try{const digest=await refreshAccountContext();if(!digest){e.target.checked=false;toast('Sign in to YouTube before enabling History sync.');return;}if(!confirm('Allow this tracker to read your YouTube History for followed episodes on this account? Only matching episode progress is stored locally; no account identifier or progress is sent to a third party.')){e.target.checked=false;return;}privacy.syncAccount=digest;savePrivacy();db.settings.syncYouTubeProgress=true;saveDB();syncYouTubeHistory(true);}finally{e.target.disabled=false;}});
     p.querySelector('#yst2-sync-history-now')?.addEventListener('click',()=>syncYouTubeHistory(true));
     p.querySelector('#yst2-auto-catalog')?.addEventListener('change',e=>{db.settings.catalogAutoRefresh=e.target.checked;saveDB();if(e.target.checked)refreshStaleSeries();});
     p.querySelector('#yst2-clear-progress')?.addEventListener('click',()=>{if(confirm('Clear all playback positions and watched states but keep series catalogs?')){rememberDatabaseUndo('clear playback progress');const clearedAt=Date.now();for(const id of Object.keys(db.episodes))privacy.clearedProgressAt[id]=clearedAt;savePrivacy();db.episodes={};saveDB();renderPanel();toast('Playback progress cleared. Undo is available for 8 seconds.');}});
@@ -3143,9 +3143,11 @@
     const listOrder=listSeries && listSeries.playlistId===list?currentPlaylistIndex():-1;
     const listedOccurrence=listSeries?episodeOccurrence(listSeries,meta.id,listOrder):null;
     const s=listedOccurrence?listSeries:(db.series.find(x=>episodeOccurrence(x,meta.id,x.playlistId===list?listOrder:-1)) || db.series.find(x=>x.bookmarkVideoId===meta.id));
-    const currentOccurrence=s?episodeOccurrence(s,meta.id,s.playlistId===list?listOrder:-1):null;
+    const ownedSession=readSeriesPlaybackSession();
+    const preferredOrder=ownedSession&&s&&ownedSession.seriesId===s.id&&ownedSession.videoId===meta.id?Number(ownedSession.order):(s&&s.playlistId===list?listOrder:-1);
+    const currentOccurrence=s?episodeOccurrence(s,meta.id,preferredOrder):null;
     if(s&&currentOccurrence){
-      const owned=readSeriesPlaybackSession();
+      const owned=ownedSession;
       if(owned&&owned.seriesId===s.id&&owned.videoId===meta.id&&Number(owned.order)===Number(currentOccurrence.order)&&Number(owned.catalogRevision)===Number(s.catalogRevision||0))activePlaybackSession=owned;
       else if(owned)clearSeriesPlaybackSession();
       s.cursorVideoId=meta.id;
@@ -3204,7 +3206,7 @@
     window.addEventListener('pagehide',onPageHide);
     const onEnded=()=>{
       checkpoint(true,true);
-      if(db.settings.autoNext && s && isWatched(meta.id)) {
+      if(db.settings.autoNext && s) {
         const next=chooseNext(s,meta.id,currentOccurrence&&currentOccurrence.order);
         if(next && next.id!==meta.id) {
           toast(`Playing next episode: ${next.title}`);
