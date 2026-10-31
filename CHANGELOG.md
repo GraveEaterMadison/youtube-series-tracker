@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.9.0
+
+- Bind local playback-recording consent to a salted digest of the active signed-in YouTube account; unknown accounts fail closed and account changes invalidate pending saves.
+- Add separately consented, account-scoped YouTube History progress sync through YouTube's same-origin browse endpoint.
+- Merge only followed-video completion state, preserve manual overrides, avoid converting percentages into guessed resume positions, and retain per-account observation baselines to prevent stale History snapshots restoring locally cleared progress.
+- Automatically scan newly loaded History rows and stop scans when the tracker or History scanning is disabled.
+- Preserve Morphe upstream GPL-3.0 licensing and NOTICE requirements.
+
+
 ## 2.8.0
 
 - Add a full-height, theme-aware YouTube History-style library surface with compact media cards and responsive spacing.
