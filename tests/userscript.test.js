@@ -771,7 +771,8 @@ test('native YouTube player navigation follows an explicitly started Series sess
   assert.match(source, /function installNativeSeriesNavigation\(\)/);
   assert.match(source, /#movie_player \.ytp-next-button, #movie_player \.ytp-prev-button/);
   assert.match(source, /function handleOwnedSeriesRouteChange\(nextVideoId\)/);
-  assert.match(source, /if \(nextVideoId === expected\.id\)/);
+  assert.match(source, /if \(nextVideoId === expected\.id && incomingOccurrence\?\.order === expected\.order\)/);
+  assert.match(source, /if \(previous && nextVideoId === previous\.id && incomingOccurrence\?\.order === previous\.order\)/);
   assert.match(source, /writeSeriesPlaybackSession\(activePlaybackSession\)/);
   assert.match(source, /navigateSeries\(direction, true\)/);
   assert.match(source, /clearSeriesPlaybackSession\(\);routeChanged\(\)/);
