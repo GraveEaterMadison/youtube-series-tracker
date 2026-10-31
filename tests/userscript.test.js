@@ -794,7 +794,7 @@ test('recording consent is bound to a known active YouTube account', () => {
   assert.match(source, /function accountIdentitySource\(\)/);
   assert.match(source, /DATASYNC_ID/);
   assert.match(source, /crypto\.subtle\.digest\('SHA-256'/);
-  assert.match(source, /privacy\.consentAccount === activeAccountDigest/);
+  assert.match(source, /accountConsentAllows\\(db\\.settings\\.recordPlaybackProgress === true, activeAccountDigest, privacy\\.consentAccount\\)/);
 });
 
 test('YouTube History sync is separate opt-in and account-scoped', () => {
@@ -846,7 +846,7 @@ test('History scanning automatically picks up newly loaded rows while scrolling'
   assert.match(source, /setTimeout\(\(\) => \{/);
   assert.match(source, /scanHistoryPage\(true\)/);
   assert.match(source, /if \(changed\) saveDB\(\)/);
-  assert.match(source, /Newly loaded entries are rescanned automatically as you scroll/);
+  assert.match(source, /Newly loaded History entries are rescanned automatically as you scroll/);
 });
 
 test('automatic playback recording is explicitly opt-in by default', () => {
