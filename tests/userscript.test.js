@@ -603,7 +603,8 @@ test('playlist and player navigation controls have independent actions', () => {
 test('local progress and History import are independently configurable', () => {
   assert.match(source,/id="yst2-record-progress"/);
   assert.match(source,/id="yst2-import-history"/);
-  assert.match(source,/db\.settings\.recordPlaybackProgress===false/);
+  assert.match(source,/function recordingAllowed\(\)/);
+  assert.match(source,/privacy\.consentAccount === activeAccountDigest/);
   assert.match(source,/db\.settings\.importHistoryProgress && percent !== null/);
   assert.match(source,/state\.completionOverride !== 'UNWATCHED'/);
 });
@@ -753,6 +754,20 @@ test('History page gets a non-destructive Series entry point', () => {
 
 
 
+
+test('playback checkpoints wait for advancing stable media and flush on pause or page hide', () => {
+  assert.match(source, /let candidateAt=performance\.now\(\)/);
+  assert.match(source, /now-candidateAt<500/);
+  assert.match(source, /now-stableDurationAt<3000/);
+  assert.match(source, /growingDuration/);
+  assert.match(source, /video\.addEventListener\('playing',onPlaying\)/);
+  assert.match(source, /video\.addEventListener\('pause',onPause\)/);
+  assert.match(source, /document\.addEventListener\('visibilitychange',onVisibility\)/);
+  assert.match(source, /window\.addEventListener\('pagehide',onPageHide\)/);
+  assert.match(source, /expectedGeneration!==privacyGeneration\|\|!recordingAllowed\(\)/);
+});
+
+
 test('recording consent is bound to a known active YouTube account', () => {
   const allows = vm.runInNewContext('(' + extractSimpleFunction(source, 'accountConsentAllows') + ')');
   assert.equal(allows(true, '', ''), false);
@@ -820,7 +835,7 @@ test('History scanning automatically picks up newly loaded rows while scrolling'
 
 test('automatic playback recording is explicitly opt-in by default', () => {
   assert.match(source, /recordPlaybackProgress: false/);
-  assert.match(source, /id="yst2-record-progress" \$\{s\.recordPlaybackProgress\?'checked':''\}/);
+  assert.match(source, /id="yst2-record-progress" \$\{recordingAllowed\(\)\?'checked':''\}/);
 });
 
 test('validated native Morphe backups retain bookmark video references', () => {
