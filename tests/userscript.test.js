@@ -815,6 +815,14 @@ test('YouTube History sync is separate opt-in and account-scoped', () => {
   assert.match(source, /function historyAccountState\(\)/);
 });
 
+
+test('account History sync runs on library open and periodically while the library remains open', () => {
+  assert.match(source, /function openPanel\(\)[^\n]*refreshAccountContext\(\)\.then\(\(\)=>\{if\(syncAllowed\(\)\)syncYouTubeHistory\(false\);\}/);
+  assert.match(source, /historySyncLastAt && Date\.now\(\) - historySyncLastAt < 30 \* 1000/);
+  assert.match(source, /syncAllowed\(\)&&document\.getElementById\(PANEL\)\?\.classList\.contains\('open'\)/);
+});
+
+
 test('History API parser reads only video renderers and does not invent resume positions', () => {
   const walk = (value, fn) => {
     if (!value || typeof value !== 'object') return;
