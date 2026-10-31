@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.10.0
+
+- Add a global `Alt+Shift+Y` shortcut to open or close the tracker popup without leaving the current YouTube page.
+- Let `Escape` close the tracker while preserving the existing Escape-to-dismiss behavior for dialogs.
+- Ignore the global toggle shortcut while typing in inputs, selects, textareas, or editable controls; bind the keyboard listener only once.
+
 ## 2.9.0
 
 - Bind local playback-recording consent to a salted digest of the active signed-in YouTube account; unknown accounts fail closed and account changes invalidate pending saves.
