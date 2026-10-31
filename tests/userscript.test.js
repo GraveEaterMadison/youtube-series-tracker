@@ -594,7 +594,7 @@ test('player follow flow exposes start-order and previous-episode options', () =
 test('playlist and player navigation controls have independent actions', () => {
   assert.match(source,/function addPlaylistFollowButton\(\)/);
   assert.match(source,/id=PLAYLIST_BTN/);
-  assert.match(source,/function navigateSeries\(direction\)/);
+  assert.match(source,/function navigateSeries\(direction, nativeOwned = false\)/);
   assert.match(source,/addNav\(PLAYER_PREV_BTN,/);
   assert.match(source,/addNav\(PLAYER_NEXT_BTN,/);
   assert.match(source,/id="yst2-player-visible"/);
@@ -604,7 +604,7 @@ test('local progress and History import are independently configurable', () => {
   assert.match(source,/id="yst2-record-progress"/);
   assert.match(source,/id="yst2-import-history"/);
   assert.match(source,/function recordingAllowed\(\)/);
-  assert.match(source,/privacy\.consentAccount === activeAccountDigest/);
+  assert.match(source,/accountConsentAllows\(db\.settings\.recordPlaybackProgress === true, activeAccountDigest, privacy\.consentAccount\)/);
   assert.match(source,/db\.settings\.importHistoryProgress && percent !== null/);
   assert.match(source,/state\.completionOverride !== 'UNWATCHED'/);
 });
