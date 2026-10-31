@@ -751,6 +751,21 @@ test('History page gets a non-destructive Series entry point', () => {
 });
 
 
+
+test('History scanning automatically picks up newly loaded rows while scrolling', () => {
+  assert.match(source, /function observeHistoryPage\(\)/);
+  assert.match(source, /historyObserver\.observe\(root,\{childList:true,subtree:true\}\)/);
+  assert.match(source, /setTimeout\(\(\) => \{/);
+  assert.match(source, /scanHistoryPage\(true\)/);
+  assert.match(source, /if \(changed\) saveDB\(\)/);
+  assert.match(source, /Newly loaded entries are rescanned automatically as you scroll/);
+});
+
+test('automatic playback recording is explicitly opt-in by default', () => {
+  assert.match(source, /recordPlaybackProgress: false/);
+  assert.match(source, /id="yst2-record-progress" \$\{s\.recordPlaybackProgress\?'checked':''\}/);
+});
+
 test('validated native Morphe backups retain bookmark video references', () => {
   const validator = source.slice(source.indexOf('function validateBackupDocument(document)'), source.indexOf('function exportBackup()'));
   assert.ok(validator.includes("const bookmarkVideoId = /^[A-Za-z0-9_-]{11}$/.test"));
