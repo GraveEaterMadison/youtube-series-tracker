@@ -823,6 +823,15 @@ test('account History sync runs on library open and periodically while the libra
 });
 
 
+
+test('Continue performs a bounded History catch-up for only the selected series', () => {
+  assert.match(source, /async function syncYouTubeHistory\(force = false, selectedSeries = ''\)/);
+  assert.match(source, /if \(selectedSeries && series\.id !== selectedSeries\) continue/);
+  assert.match(source, /const maxPages = force \|\| selectedSeries \? 3 : 1/);
+  assert.match(source, /await syncYouTubeHistory\(true,s\.id\)/);
+});
+
+
 test('History API parser reads only video renderers and does not invent resume positions', () => {
   const walk = (value, fn) => {
     if (!value || typeof value !== 'object') return;
