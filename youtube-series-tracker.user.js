@@ -34,6 +34,7 @@
   const PLAYER_PREV_BTN = 'yst2-player-previous';
   const PLAYER_NEXT_BTN = 'yst2-player-next';
   const PLAYLIST_BTN = 'yst2-playlist-action';
+  const SERIES_SESSION_KEY = 'yst2-series-playback-session';
   let undoExpiryTimer = null;
   let activePlaybackSession = null;
   let staleRefreshBusy = false;
@@ -116,7 +117,7 @@
       activeAccountIdentity = identity;
       activeAccountDigest = digest;
       privacyGeneration++;
-      activePlaybackSession = null;
+      clearSeriesPlaybackSession();
       lastSave = 0;
       if (document.getElementById(PANEL)?.classList.contains('open')) renderPanel();
       if (location.pathname.startsWith('/feed/history') && syncAllowed()) syncYouTubeHistory(false);
@@ -1386,21 +1387,22 @@
     if (idx >= 0) return eps.slice(idx + 1).find(e => !isWatched(e.id)) || null;
     return chooseContinue(s);
   }
-  function navigateSeries(direction) {
+  function navigateSeries(direction, nativeOwned = false) {
     const videoId=getVideoId(), listId=getPlaylistId();
     let series=activePlaybackSession?findSeries(activePlaybackSession.seriesId):null;
     if(!series||!series.episodes.some(ep=>ep.id===videoId)){
       const candidates=db.series.filter(item=>episodeOccurrence(item,videoId,item.playlistId===listId?currentPlaylistIndex():-1));
       series=candidates.length===1?candidates[0]:null;
     }
-    if(!series){toast('This video is not in a followed series.');return false;}
+    if(!series){if(nativeOwned)return true;toast('This video is not in a followed series.');return false;}
+    if(nativeOwned&&(!activePlaybackSession||activePlaybackSession.videoId!==videoId))return false;
     const requestedOrder=series.playlistId===listId?currentPlaylistIndex():-1;
     const occurrence=episodeOccurrence(series,videoId,requestedOrder);
     if(!occurrence){toast('Could not identify this episode occurrence.');return false;}
     const episodes=orderedEpisodes(series).filter(ep=>ep.available!==false&&!ep.unavailable&&/^[A-Za-z0-9_-]{11}$/.test(ep.id));
     const index=episodes.findIndex(ep=>ep.id===videoId&&ep.order===occurrence.order);
     const target=episodes[index+direction];
-    if(!target){toast(direction<0?'This is the first episode.':'This is the last episode.');return false;}
+    if(!target){toast(direction<0?'This is the first episode.':'This is the last episode.');return nativeOwned;}
     openEpisode(series,target,true);
     return true;
   }
@@ -1415,6 +1417,7 @@
     s.cursorUpdatedAt = Date.now();
     s.cursorRevision = Number(s.catalogRevision) || 0;
     activePlaybackSession = {seriesId:s.id,videoId:e.id,order:e.order,catalogRevision:Number(s.catalogRevision)||0};
+    writeSeriesPlaybackSession(activePlaybackSession);
     saveDB();
     location.href = urlFor(e.id, s.playlistId, s.playlistId ? e.order : undefined, resume && !startsHere && !isWatched(e.id) ? st.position : 0);
   }
@@ -2001,7 +2004,7 @@
     p.querySelector('#yst2-export')?.addEventListener('click',exportBackup);
     p.querySelector('#yst2-export-morphe')?.addEventListener('click',exportMorpheBackup);
     p.querySelector('#yst2-import')?.addEventListener('click',importBackup);
-    p.querySelector('#yst2-enabled')?.addEventListener('change',e=>{db.settings.enabled=e.target.checked;saveDB();observeHistoryPage();if(!e.target.checked){if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;}activePlaybackSession=null;currentVideoId='';activeVideo=null;addSidebarButton();addPlayerButton();addPlaylistFollowButton();toast('Series Tracker disabled. Your saved data is kept.');}else{ensureUI();trackCurrentVideo();toast('Series Tracker enabled.');}});
+    p.querySelector('#yst2-enabled')?.addEventListener('change',e=>{db.settings.enabled=e.target.checked;saveDB();observeHistoryPage();if(!e.target.checked){if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;}clearSeriesPlaybackSession();currentVideoId='';activeVideo=null;addSidebarButton();addPlayerButton();addPlaylistFollowButton();toast('Series Tracker disabled. Your saved data is kept.');}else{ensureUI();trackCurrentVideo();toast('Series Tracker enabled.');}});
     p.querySelector('#yst2-threshold')?.addEventListener('change',e=>{db.settings.watchedThreshold=Number(e.target.value);saveDB();});
     p.querySelector('#yst2-remaining')?.addEventListener('change',e=>{db.settings.watchedRemainingSeconds=Number(e.target.value);saveDB();});
     p.querySelector('#yst2-autonext')?.addEventListener('change',e=>{db.settings.autoNext=e.target.checked;saveDB();});
@@ -3114,6 +3117,14 @@
       @media(max-width:600px){#${PANEL}{top:8px;right:8px;bottom:8px;width:calc(100vw - 16px);max-height:calc(100dvh - 16px);border-radius:15px}#${PANEL} .yst2-toolbar{padding:10px;flex-wrap:wrap}#${PANEL} .yst2-primary-actions{flex-wrap:wrap}#${PANEL} .yst2-footer{gap:6px;flex-wrap:wrap}}
         `;document.head.appendChild(st);
   }
+  function readSeriesPlaybackSession() {
+    try {
+      const value = JSON.parse(sessionStorage.getItem(SERIES_SESSION_KEY) || 'null');
+      return value && typeof value === 'object' && /^[A-Za-z0-9_-]{11}$/.test(String(value.videoId || '')) ? value : null;
+    } catch (_) { return null; }
+  }
+  function writeSeriesPlaybackSession(value) { try { sessionStorage.setItem(SERIES_SESSION_KEY, JSON.stringify(value)); } catch (_) {} }
+  function clearSeriesPlaybackSession() { activePlaybackSession = null; try { sessionStorage.removeItem(SERIES_SESSION_KEY); } catch (_) {} }
   function trackCurrentVideo() {
     if (db.settings.enabled === false) { if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;} currentVideoId='';activeVideo=null;activePlaybackSession=null;return; }
     const meta=videoMeta(), video=document.querySelector('video');
@@ -3134,7 +3145,9 @@
     const s=listedOccurrence?listSeries:(db.series.find(x=>episodeOccurrence(x,meta.id,x.playlistId===list?listOrder:-1)) || db.series.find(x=>x.bookmarkVideoId===meta.id));
     const currentOccurrence=s?episodeOccurrence(s,meta.id,s.playlistId===list?listOrder:-1):null;
     if(s&&currentOccurrence){
-      activePlaybackSession={seriesId:s.id,videoId:meta.id,order:currentOccurrence.order,catalogRevision:Number(s.catalogRevision)||0};
+      const owned=readSeriesPlaybackSession();
+      if(owned&&owned.seriesId===s.id&&owned.videoId===meta.id&&Number(owned.order)===Number(currentOccurrence.order)&&Number(owned.catalogRevision)===Number(s.catalogRevision||0))activePlaybackSession=owned;
+      else if(owned)clearSeriesPlaybackSession();
       s.cursorVideoId=meta.id;
       s.cursorOrder=currentOccurrence.order;
       s.cursorUpdatedAt=Date.now();
@@ -3237,8 +3250,35 @@
     });
     mo.observe(document.documentElement,{childList:true,subtree:true});
   }
+
+  function installNativeSeriesNavigation() {
+    if (document.documentElement.dataset.yst2NativeNavigation === '1') return;
+    document.documentElement.dataset.yst2NativeNavigation = '1';
+    document.addEventListener('click', event => {
+      const target = event.target && event.target.closest && event.target.closest('#movie_player .ytp-next-button, #movie_player .ytp-prev-button');
+      if (target && activePlaybackSession) {
+        const direction = target.matches('.ytp-prev-button') ? -1 : 1;
+        if (navigateSeries(direction, true)) {
+          event.preventDefault();
+          event.stopPropagation();
+          event.stopImmediatePropagation();
+        }
+        return;
+      }
+      if (!activePlaybackSession) return;
+      const link = event.target && event.target.closest && event.target.closest('a[href]');
+      if (!link || link.closest('#' + PANEL) || link.closest('#' + PLAYER_BTN) || link.closest('#' + PLAYLIST_BTN)) return;
+      try {
+        const next = new URL(link.href, location.origin);
+        const nextId = next.pathname === '/watch' ? next.searchParams.get('v') : '';
+        if (nextId && nextId !== activePlaybackSession.videoId) clearSeriesPlaybackSession();
+      } catch (_) {}
+    }, true);
+  }
+
   function boot() {
     ensureUI();
+    installNativeSeriesNavigation();
     refreshAccountContext().then(()=>{if(location.pathname.startsWith('/feed/history')&&syncAllowed())syncYouTubeHistory(false);}).catch(()=>{});
     routeChanged();
     document.addEventListener('yt-navigate-finish',routeChanged);
