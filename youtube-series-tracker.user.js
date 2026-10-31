@@ -1805,7 +1805,7 @@
       ${activeTab === 'settings' ? '' : `<div class="yst2-searchwrap"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"></circle><path d="m16 16 5 5"></path></svg><input id="yst2-search" type="search" value="${esc(librarySearch)}" placeholder="${activeTab==='history'?'Search history matches':'Search series and episodes'}" aria-label="Search ${activeTab==='history'?'history matches':'series and episodes'}"><kbd>⌕</kbd></div>`}
       <div id="yst2-search-empty" class="yst2-search-empty" hidden>No matches. Try another title.</div>
       <div class="yst2-content">${body}</div>
-      <footer class="yst2-footer"><span class="yst2-privacy"><span></span> Stored locally</span><span class="yst2-credit"><span class="yst2-credit-mark">✦</span> Made by zeroyogurt</span><span>${db.lastSync?`Synced ${new Date(db.lastSync).toLocaleDateString()}`:'Not synced yet'}</span>${lastUndo?'<button id="yst2-undo" class="yst2-subbtn" type="button">Undo last change</button>':''}</footer>`;
+      <footer class="yst2-footer"><span class="yst2-privacy"><span></span> Stored locally</span><span class="yst2-credit"><span class="yst2-credit-mark">✦</span> Made by zeroyogurt · <a class="yst2-credit-link" href="https://github.com/GraveEaterMadison" target="_blank" rel="noopener noreferrer" title="Visit GitHub profile">GitHub ↗</a></span><span>${db.lastSync?`Synced ${new Date(db.lastSync).toLocaleDateString()}`:'Not synced yet'}</span>${lastUndo?'<button id="yst2-undo" class="yst2-subbtn" type="button">Undo last change</button>':''}</footer>`;
     bindPanel();
     for (const [id, state] of episodeUiState) {
       const details = p.querySelector('details[data-series-details="' + CSS.escape(id) + '"]');
@@ -2828,6 +2828,7 @@
       #${PANEL} .yst2-footer{background:#121219;border-top:1px solid #302a37}
       #${PANEL} .yst2-footer .yst2-credit{color:#d7a8c5;font-weight:650;letter-spacing:.15px;white-space:nowrap}
       #${PANEL} .yst2-footer .yst2-credit-mark{color:#f47a9d}
+      #${PANEL} .yst2-credit-link{color:#f3c0dc;text-decoration:none;border-bottom:1px solid #80536f;margin-left:3px}#${PANEL} .yst2-credit-link:hover{color:#fff;border-color:#ff82a2}
       #${PANEL} .yst2-modal{background:#201c27;border:1px solid #594254;box-shadow:0 20px 60px #000b}
       #${PANEL} .yst2-modal-head{border-bottom-color:#443443}
       #${PANEL} .yst2-modal-head h3{color:#fff}
