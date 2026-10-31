@@ -57,7 +57,7 @@ test('sidebar button relocates when YouTube navigation loads after the userscrip
 });
 
 test('one-by-one series builder actions are wired and versioned', () => {
-  assert.match(source, /^\/\/ @version\s+2\.9\.0$/m);
+  assert.match(source, /^\/\/ @version\s+2\.10\.0$/m);
   assert.match(source, /id="yst2-add-current"/);
   assert.match(source, /function showAddVideoDialog\(\)/);
   assert.match(source, /function saveVideoToSeries\(series, meta\)/);
@@ -888,4 +888,33 @@ test('validated native Morphe backups retain bookmark video references', () => {
   assert.ok(validator.includes("const bookmarkVideoId = /^[A-Za-z0-9_-]{11}$/.test"));
   assert.match(validator, /bookmarkVideoId,/);
   assert.match(source, /if \(db\.settings\.enabled === false \|\| !onHistory\)/);
+});
+
+test('keyboard shortcuts toggle the popup, close it with Escape, and ignore editable controls', () => {
+  const state = { toggles: 0, closes: 0 };
+  const panel = { classList: { contains: value => value === 'open' } };
+  const handle = vm.runInNewContext(`(${extractSimpleFunction(source, 'handleTrackerKeyboardShortcuts')})`, {
+    PANEL: 'panel',
+    document: { getElementById: () => panel },
+    togglePanel: () => { state.toggles++; },
+    closePanel: () => { state.closes++; }
+  });
+  const event = (overrides = {}) => ({
+    key: 'y', altKey: true, shiftKey: true, ctrlKey: false, metaKey: false,
+    target: { tagName: 'BODY', isContentEditable: false },
+    preventDefault() { this.prevented = true; },
+    ...overrides
+  });
+  const shortcut = event();
+  handle(shortcut);
+  assert.equal(state.toggles, 1);
+  assert.equal(shortcut.prevented, true);
+  handle(event({ target: { tagName: 'INPUT' } }));
+  handle(event({ target: { tagName: 'TEXTAREA' } }));
+  handle(event({ target: { tagName: 'DIV', isContentEditable: true } }));
+  assert.equal(state.toggles, 1);
+  handle(event({ key: 'Escape', altKey: false, shiftKey: false }));
+  assert.equal(state.closes, 1);
+  handle(event({ key: 'Escape', altKey: false, shiftKey: false, target: { closest: () => ({}) } }));
+  assert.equal(state.closes, 1);
 });
