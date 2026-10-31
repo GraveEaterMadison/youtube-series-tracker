@@ -163,7 +163,7 @@ test('video listeners are detached before tracking a new YouTube route', () => {
   assert.doesNotMatch(source, /const listenerVideos = new WeakSet\(\)/);
 });
 
-test('library UI includes search, progress overview, artwork, accessible tabs, and responsive polish', () => {
+test('library UI includes search, dashboard, artwork, accessible tabs, and responsive polish', () => {
   assert.match(source, /id="yst2-search"/);
   assert.match(source, /id="yst2-dashboard"/);
   assert.match(source, /class="yst2-series-art"/);
@@ -171,6 +171,8 @@ test('library UI includes search, progress overview, artwork, accessible tabs, a
   assert.match(source, /data-sync="' \+ esc\(s\.id\)/);
   assert.match(source, /const applySearch = \(\)/);
   assert.match(source, /prefers-reduced-motion:reduce/);
+  assert.match(source, /Morphe Series Tracker parity/);
+  assert.match(source, /#\$\{PANEL\}/);
 });
 
 test('playlist fetch is scoped to the requested list and follows bounded continuation pages', () => {
