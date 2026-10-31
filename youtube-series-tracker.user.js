@@ -17,6 +17,7 @@
   'use strict';
   const VERSION = 2;
   const KEY = 'yt-series-tracker-v2';
+  const PRIVACY_KEY = 'yt-series-tracker-privacy-v1';
   const LEGACY_KEYS = ['yt-series-tracker-v1'];
   const PANEL = 'yst2-panel';
   const STYLE = 'yst2-style';
@@ -38,6 +39,11 @@
   let staleRefreshBusy = false;
   let staleRefreshTimer = null;
   const AUTO_SYNC_KEY = 'yst2-last-sync';
+  let privacy = loadPrivacy();
+  let activeAccountIdentity = '';
+  let activeAccountDigest = '';
+  let privacyGeneration = 0;
+  let accountRefreshPromise = null;
   let db = loadDB();
   let activeTab = 'library';
   let librarySearch = '';
@@ -56,6 +62,69 @@
   let historyObserver = null;
   let historyObserverRoot = null;
   let historyScanTimer = null;
+
+
+  function loadPrivacy() {
+    try {
+      const value = JSON.parse(localStorage.getItem(PRIVACY_KEY) || '{}');
+      return {
+        salt: /^[A-Za-z0-9_-]{32,128}$/.test(String(value.salt || '')) ? value.salt : '',
+        consentAccount: /^[a-f0-9]{64}$/.test(String(value.consentAccount || '')) ? value.consentAccount : ''
+      };
+    } catch (_) { return { salt: '', consentAccount: '' }; }
+  }
+  function savePrivacy() {
+    try { localStorage.setItem(PRIVACY_KEY, JSON.stringify(privacy)); }
+    catch (error) { console.warn('[YouTube Series] Privacy settings could not be saved', error); }
+  }
+  function accountIdentitySource() {
+    try {
+      const cfg = window.ytcfg?.data_ || {};
+      const get = key => window.ytcfg?.get?.(key) ?? cfg[key];
+      const loggedIn = get('LOGGED_IN') === true || String(get('LOGGED_IN')) === '1';
+      const dataSync = String(get('DATASYNC_ID') || '');
+      const delegated = String(get('DELEGATED_SESSION_ID') || '');
+      const session = String(get('SESSION_INDEX') ?? '');
+      const identity = dataSync || delegated;
+      return loggedIn && identity ? identity + ':' + session : '';
+    } catch (_) { return ''; }
+  }
+  async function digestAccountIdentity(identity) {
+    if (!identity || !crypto?.subtle || !crypto?.getRandomValues) return '';
+    if (!privacy.salt) {
+      const bytes = new Uint8Array(24);
+      crypto.getRandomValues(bytes);
+      privacy.salt = Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('');
+      savePrivacy();
+    }
+    const payload = new TextEncoder().encode(privacy.salt + '\\0' + identity);
+    const digest = await crypto.subtle.digest('SHA-256', payload);
+    return Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, '0')).join('');
+  }
+  async function refreshAccountContext() {
+    if (accountRefreshPromise) return accountRefreshPromise;
+    accountRefreshPromise = (async () => {
+      const identity = accountIdentitySource();
+      if (identity === activeAccountIdentity) return activeAccountDigest;
+      const digest = await digestAccountIdentity(identity);
+      if (identity !== accountIdentitySource()) return refreshAccountContext();
+      if (digest !== activeAccountDigest) {
+        activeAccountIdentity = identity;
+        activeAccountDigest = digest;
+        privacyGeneration++;
+        activePlaybackSession = null;
+        lastSave = 0;
+      }
+      return activeAccountDigest;
+    })();
+    try { return await accountRefreshPromise; }
+    finally { accountRefreshPromise = null; }
+  }
+  function recordingAllowed() {
+    return db.settings.recordPlaybackProgress === true
+      && Boolean(activeAccountDigest)
+      && privacy.consentAccount === activeAccountDigest;
+  }
 
   function emptyDB() {
     return {
@@ -1917,7 +1986,7 @@
     p.querySelector('#yst2-historyscan')?.addEventListener('change',e=>{db.settings.historyScan=e.target.checked;saveDB();observeHistoryPage();});
     p.querySelector('#yst2-sidebar')?.addEventListener('change',e=>{db.settings.showSidebarButton=e.target.checked;saveDB();addSidebarButton();});
     p.querySelector('#yst2-player-visible')?.addEventListener('change',e=>{db.settings.showPlayerButton=e.target.checked;saveDB();addPlayerButton();});
-    p.querySelector('#yst2-record-progress')?.addEventListener('change',e=>{if(e.target.checked&&!confirm('Record playback progress for followed episodes in this browser? This stays in YouTube local storage and is not sent to Morphe or Google.')){e.target.checked=false;return;}db.settings.recordPlaybackProgress=e.target.checked;saveDB();if(!e.target.checked)activePlaybackSession=null;});
+    p.querySelector('#yst2-record-progress')?.addEventListener('change',async e=>{const enabled=e.target.checked;if(!enabled){db.settings.recordPlaybackProgress=false;privacy.consentAccount='';savePrivacy();saveDB();activePlaybackSession=null;privacyGeneration++;return;}e.target.disabled=true;try{const digest=await refreshAccountContext();if(!digest){e.target.checked=false;toast('Sign in to YouTube before enabling account-bound progress recording.');return;}if(!confirm('Enable local playback recording for this YouTube account? Progress stays in this browser. It is disabled automatically when the active account changes; no account identifier is stored or sent.')){e.target.checked=false;return;}privacy.consentAccount=digest;savePrivacy();db.settings.recordPlaybackProgress=true;saveDB();privacyGeneration++;toast('Playback recording enabled for this account.');}finally{e.target.disabled=false;}});
     p.querySelector('#yst2-import-history')?.addEventListener('change',e=>{db.settings.importHistoryProgress=e.target.checked;saveDB();if(location.pathname.startsWith('/feed/history'))scanHistoryPage(true);});
     p.querySelector('#yst2-auto-catalog')?.addEventListener('change',e=>{db.settings.catalogAutoRefresh=e.target.checked;saveDB();if(e.target.checked)refreshStaleSeries();});
     p.querySelector('#yst2-clear-progress')?.addEventListener('click',()=>{if(confirm('Clear all playback positions and watched states but keep series catalogs?')){rememberDatabaseUndo('clear playback progress');db.episodes={};saveDB();renderPanel();toast('Playback progress cleared. Undo is available for 8 seconds.');}});
