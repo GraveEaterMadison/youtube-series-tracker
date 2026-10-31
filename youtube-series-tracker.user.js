@@ -262,7 +262,9 @@
   }
   function isWatched(id) { return isWatchedState(stateFor(id)); }
   function shouldAutoComplete(position, duration, threshold, remainingSeconds, ended = false) {
-    if (ended) return true;
+    // Match Morphe's CompletionPolicy: an ENDED signal is only a checkpoint,
+    // never proof of completion by itself. Require a valid duration and tail threshold.
+    void ended;
     if (!Number.isFinite(position) || position < 0 || !Number.isFinite(duration) || duration <= 0) return false;
     const fraction = Math.max(0, Math.min(1, Number(threshold)));
     // HTMLMediaElement.currentTime and duration are seconds; native Morphe code stores milliseconds.
