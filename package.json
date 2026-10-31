@@ -1,6 +1,6 @@
 {
   "name": "youtube-series-tracker",
-  "version": "2.9.0",
+  "version": "2.10.0",
   "private": false,
   "description": "Local-first YouTube series tracker with Morphe-inspired follow, episode actions, resume, History and native backup compatibility",
   "license": "GPL-3.0-only",
