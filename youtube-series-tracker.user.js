@@ -3138,34 +3138,58 @@
       s.cursorOrder=currentOccurrence.order;
       s.cursorUpdatedAt=Date.now();
     }
-    const savePosition=async()=>{
+    let candidateAt=performance.now();
+    let previousCandidatePosition=Number(video.currentTime)||0;
+    let stableDuration=Number(video.duration)||0;
+    let stableDurationAt=stableDuration>0?performance.now():0;
+    let validPlayback=false;
+    let growingDuration=false;
+    let lastCheckpointAt=0;
+    let lastCheckpointPosition=-1;
+    const checkpoint=async(force=false,ended=false)=>{
       const expectedGeneration=privacyGeneration;
       await refreshAccountContext();
       if(expectedGeneration!==privacyGeneration||!recordingAllowed()||!s||location.pathname.startsWith('/shorts/'))return;
-      if(!Number.isFinite(video.currentTime)||!Number.isFinite(video.duration)||video.duration<=0||video.duration>604800)return;
-      const dur=video.duration;
-      const old=stateFor(meta.id), threshold=Number(db.settings.watchedThreshold);
-      const watched=old.completionOverride === 'WATCHED' || (old.completionOverride !== 'UNWATCHED' && (old.watched || shouldAutoComplete(video.currentTime,dur,threshold,Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS),video.ended)));
-      setState(meta.id,{title:meta.title||old.title,position:watched?(dur||video.currentTime):video.currentTime,duration:dur||old.duration,watched},false);
+      const now=performance.now();
+      const position=Number(video.currentTime), duration=Number(video.duration);
+      if(!Number.isFinite(position)||position<0||!Number.isFinite(duration)||duration<=0||duration>604800)return;
+      if(stableDuration>0&&Math.abs(duration-stableDuration)>1)growingDuration=true;
+      if(duration!==stableDuration){stableDuration=duration;stableDurationAt=now;}
+      if(!validPlayback){
+        const advancing=position>previousCandidatePosition;
+        previousCandidatePosition=position;
+        if(now-candidateAt<500||!advancing)return;
+        validPlayback=true;
+      }
+      if(growingDuration||now-stableDurationAt<3000)return;
+      if(!force&&now-lastCheckpointAt<SAVE_MS)return;
+      if(position===lastCheckpointPosition&&!ended)return;
+      const old=stateFor(meta.id);
+      const threshold=Number(db.settings.watchedThreshold);
+      const watched=old.completionOverride==='WATCHED'||(old.completionOverride!=='UNWATCHED'&&(old.watched||shouldAutoComplete(position,duration,threshold,Number(db.settings.watchedRemainingSeconds??AUTO_WATCHED_REMAINING_SECONDS),ended||video.ended)));
+      setState(meta.id,{title:meta.title||old.title,position:watched?duration:position,duration,watched},false);
       db.history[meta.id]={title:meta.title,lastSeen:Date.now()};
       saveDB();
+      lastCheckpointAt=now;
+      lastCheckpointPosition=position;
+      lastSave=Date.now();
       if(document.getElementById(PANEL)?.classList.contains('open')&&Date.now()-lastPanelRender>1800){lastPanelRender=Date.now();renderPanel();}
     };
-    const onTime=()=>{if(Date.now()-lastSave>=SAVE_MS){lastSave=Date.now();savePosition();}};
+    const onPlaying=()=>{
+      if(!validPlayback){candidateAt=performance.now();previousCandidatePosition=Number(video.currentTime)||0;}
+    };
+    const onTime=()=>{if(Date.now()-lastSave>=SAVE_MS)checkpoint(false,false);};
+    const onPause=()=>checkpoint(true,false);
+    const onVisibility=()=>{if(document.visibilityState==='hidden')checkpoint(true,false);};
+    const onPageHide=()=>checkpoint(true,false);
+    video.addEventListener('playing',onPlaying);
     video.addEventListener('timeupdate',onTime);
-    video.addEventListener('loadedmetadata',savePosition,{once:true});
-    video.addEventListener('pause',savePosition);
+    video.addEventListener('loadedmetadata',()=>{stableDuration=Number(video.duration)||0;stableDurationAt=performance.now();},{once:true});
+    video.addEventListener('pause',onPause);
+    document.addEventListener('visibilitychange',onVisibility);
+    window.addEventListener('pagehide',onPageHide);
     const onEnded=()=>{
-      const expectedGeneration=privacyGeneration;
-      refreshAccountContext().then(()=>{
-        if(expectedGeneration!==privacyGeneration||!recordingAllowed()||!s)return;
-        const previous=stateFor(meta.id);
-        if(previous.completionOverride!=='UNWATCHED'){
-          setState(meta.id,{title:meta.title,position:video.duration||meta.duration,duration:video.duration||meta.duration,watched:true},false);
-        }
-        db.history[meta.id]={title:meta.title,lastSeen:Date.now()};
-        saveDB();
-      });
+      checkpoint(true,true);
       if(db.settings.autoNext && s && isWatched(meta.id)) {
         const next=chooseNext(s,meta.id,currentOccurrence&&currentOccurrence.order);
         if(next && next.id!==meta.id) {
@@ -3177,12 +3201,14 @@
     };
     video.addEventListener('ended',onEnded);
     activeVideoCleanup=()=>{
+      video.removeEventListener('playing',onPlaying);
       video.removeEventListener('timeupdate',onTime);
-      video.removeEventListener('loadedmetadata',savePosition);
-      video.removeEventListener('pause',savePosition);
+      video.removeEventListener('pause',onPause);
+      document.removeEventListener('visibilitychange',onVisibility);
+      window.removeEventListener('pagehide',onPageHide);
       video.removeEventListener('ended',onEnded);
     };
-    if(s&&recordingAllowed()){db.history[meta.id]={title:meta.title,lastSeen:Date.now()};saveDB();}
+    if(s&&recordingAllowed())checkpoint(true,false);
   }
   function routeChanged() {
     clearTimeout(routeTimer);
