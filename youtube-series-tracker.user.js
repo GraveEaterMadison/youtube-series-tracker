@@ -3224,10 +3224,31 @@
     };
     if(s&&recordingAllowed())checkpoint(true,false);
   }
+
+  function handleOwnedSeriesRouteChange(nextVideoId) {
+    const owned = activePlaybackSession || readSeriesPlaybackSession();
+    if (!owned || !nextVideoId || nextVideoId === owned.videoId) return false;
+    const series = findSeries(owned.seriesId);
+    if (!series) { clearSeriesPlaybackSession(); return false; }
+    const episodes = orderedEpisodes(series).filter(ep => ep.available !== false && !ep.unavailable && /^[A-Za-z0-9_-]{11}$/.test(ep.id));
+    const currentIndex = episodes.findIndex(ep => ep.id === owned.videoId && ep.order === Number(owned.order));
+    const expected = currentIndex >= 0 ? episodes[currentIndex + 1] : null;
+    if (!expected) { clearSeriesPlaybackSession(); return false; }
+    if (nextVideoId === expected.id) {
+      activePlaybackSession = { seriesId: series.id, videoId: expected.id, order: expected.order, catalogRevision: Number(series.catalogRevision) || 0 };
+      writeSeriesPlaybackSession(activePlaybackSession);
+      return false;
+    }
+    toast('Keeping playback in the followed series.');
+    openEpisode(series, expected, true);
+    return true;
+  }
+
   function routeChanged() {
     clearTimeout(routeTimer);
     routeTimer=setTimeout(()=>{
       ensureUI();
+      if (handleOwnedSeriesRouteChange(getVideoId())) return;
       currentVideoId='';activeVideo=null;
       trackCurrentVideo();
       if(db.settings.autoSyncOnOpen && getPlaylistId() && !syncBusy) {
@@ -3282,7 +3303,7 @@
     refreshAccountContext().then(()=>{if(location.pathname.startsWith('/feed/history')&&syncAllowed())syncYouTubeHistory(false);}).catch(()=>{});
     routeChanged();
     document.addEventListener('yt-navigate-finish',routeChanged);
-    window.addEventListener('popstate',routeChanged);
+    window.addEventListener('popstate',()=>{clearSeriesPlaybackSession();routeChanged();});
     observeSidebar();
     // YouTube may replace its video element without firing SPA navigation.
     if(tickTimer)clearInterval(tickTimer);
