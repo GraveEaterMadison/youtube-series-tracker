@@ -1909,7 +1909,7 @@
     p.querySelector('#yst2-export')?.addEventListener('click',exportBackup);
     p.querySelector('#yst2-export-morphe')?.addEventListener('click',exportMorpheBackup);
     p.querySelector('#yst2-import')?.addEventListener('click',importBackup);
-    p.querySelector('#yst2-enabled')?.addEventListener('change',e=>{db.settings.enabled=e.target.checked;saveDB();if(!e.target.checked){if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;}activePlaybackSession=null;currentVideoId='';activeVideo=null;addSidebarButton();addPlayerButton();addPlaylistFollowButton();toast('Series Tracker disabled. Your saved data is kept.');}else{ensureUI();trackCurrentVideo();toast('Series Tracker enabled.');}});
+    p.querySelector('#yst2-enabled')?.addEventListener('change',e=>{db.settings.enabled=e.target.checked;saveDB();observeHistoryPage();if(!e.target.checked){if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;}activePlaybackSession=null;currentVideoId='';activeVideo=null;addSidebarButton();addPlayerButton();addPlaylistFollowButton();toast('Series Tracker disabled. Your saved data is kept.');}else{ensureUI();trackCurrentVideo();toast('Series Tracker enabled.');}});
     p.querySelector('#yst2-threshold')?.addEventListener('change',e=>{db.settings.watchedThreshold=Number(e.target.value);saveDB();});
     p.querySelector('#yst2-remaining')?.addEventListener('change',e=>{db.settings.watchedRemainingSeconds=Number(e.target.value);saveDB();});
     p.querySelector('#yst2-autonext')?.addEventListener('change',e=>{db.settings.autoNext=e.target.checked;saveDB();});
@@ -2207,6 +2207,7 @@
     return null;
   }
   function scanHistoryPage(quiet = false) {
+    if (db.settings.enabled === false || db.settings.historyScan === false) return 0;
     if (!location.pathname.startsWith('/feed/history')) {
       if (!quiet) toast('Open youtube.com/feed/history first, then select Scan History.');
       return 0;
