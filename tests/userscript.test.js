@@ -915,10 +915,10 @@ test('keyboard shortcuts toggle the popup, close it with Escape, and ignore edit
   handle(event({ target: { tagName: 'INPUT' } }));
   handle(event({ target: { tagName: 'TEXTAREA' } }));
   handle(event({ target: { tagName: 'DIV', isContentEditable: true } }));
-  assert.equal(toggles, 1);
+  assert.equal(state.toggles, 1);
 
   handle(event({ key: 'Escape', altKey: false, shiftKey: false }));
   assert.equal(state.closes, 1);
   handle(event({ key: 'Escape', altKey: false, shiftKey: false, target: { closest: () => ({}) } }));
-  assert.equal(closes, 1);
+  assert.equal(state.closes, 1);
 });
