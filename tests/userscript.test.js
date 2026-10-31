@@ -440,7 +440,11 @@ test('Morphe-style completion policy supports percentage and remaining-time comp
   assert.equal(complete(920, 1000, 0.92, 30, false), true);
   assert.equal(complete(850, 1000, 0.92, 30, false), false);
   assert.equal(complete(970, 1000, 1, 30, false), true);
-  assert.equal(complete(500, 1000, 0.92, 30, true), true);
+  // An ENDED event flushes a checkpoint; it must not bypass completion policy.
+  assert.equal(complete(500, 1000, 0.92, 30, true), false);
+  assert.equal(complete(920, 1000, 0.92, 30, true), true);
+  assert.equal(complete(570, 600, 0.92, 30, false), true);
+  assert.equal(complete(500, 600, 0.92, 30, false), false);
   assert.equal(complete(50, 0, 0.92, 30, false), false);
 });
 
