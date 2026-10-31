@@ -69,9 +69,12 @@
       const value = JSON.parse(localStorage.getItem(PRIVACY_KEY) || '{}');
       return {
         salt: /^[A-Za-z0-9_-]{32,128}$/.test(String(value.salt || '')) ? value.salt : '',
-        consentAccount: /^[a-f0-9]{64}$/.test(String(value.consentAccount || '')) ? value.consentAccount : ''
+        consentAccount: /^[a-f0-9]{64}$/.test(String(value.consentAccount || '')) ? value.consentAccount : '',
+        syncAccount: /^[a-f0-9]{64}$/.test(String(value.syncAccount || '')) ? value.syncAccount : '',
+        historyBaselines: value.historyBaselines && typeof value.historyBaselines === 'object' ? value.historyBaselines : {},
+        clearedProgressAt: value.clearedProgressAt && typeof value.clearedProgressAt === 'object' ? value.clearedProgressAt : {}
       };
-    } catch (_) { return { salt: '', consentAccount: '' }; }
+    } catch (_) { return { salt: '', consentAccount: '', syncAccount: '', historyBaselines: {}, clearedProgressAt: {} }; }
   }
   function savePrivacy() {
     try { localStorage.setItem(PRIVACY_KEY, JSON.stringify(privacy)); }
@@ -125,6 +128,17 @@
       && Boolean(activeAccountDigest)
       && privacy.consentAccount === activeAccountDigest;
   }
+  function syncAllowed() {
+    return db.settings.syncYouTubeProgress === true
+      && Boolean(activeAccountDigest)
+      && privacy.syncAccount === activeAccountDigest;
+  }
+  function historyAccountState() {
+    if (!activeAccountDigest) return null;
+    if (!privacy.historyBaselines[activeAccountDigest]) privacy.historyBaselines[activeAccountDigest] = {};
+    return privacy.historyBaselines[activeAccountDigest];
+  }
+
 
   function emptyDB() {
     return {
@@ -139,6 +153,7 @@
         historyScan: true,
         catalogAutoRefresh: true,
         recordPlaybackProgress: false,
+        syncYouTubeProgress: false,
         importHistoryProgress: false,
         showPlayerButton: true
       },
@@ -1908,9 +1923,11 @@
       <label class="yst2-setting"><input type="checkbox" id="yst2-player-visible" ${s.showPlayerButton!==false?'checked':''}> Show Series and previous/next controls in the player</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-record-progress" ${s.recordPlaybackProgress?'checked':''}> Record local playback progress for followed episodes</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-import-history" ${s.importHistoryProgress?'checked':''}> Use visible History progress bars for completion</label>
+      <label class="yst2-setting"><input type="checkbox" id="yst2-sync-youtube" ${syncAllowed()?'checked':''}> Sync progress from this YouTube account's History</label>
+      <button id="yst2-sync-history-now" class="yst2-subbtn">Sync YouTube History now</button>
       <label class="yst2-setting"><input type="checkbox" id="yst2-auto-catalog" ${s.catalogAutoRefresh!==false?'checked':''}> Refresh stale followed playlists automatically</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-historyscan" ${s.historyScan?'checked':''}> Match YouTube History page videos to known episodes</label>
-      <p class="yst2-muted">History import uses only progress indicators currently rendered on the History page. Newly loaded entries are rescanned automatically as you scroll. It never reads account identifiers or sends progress to a server.</p>
+      <p class="yst2-muted">Visible History scanning reads only rendered rows. Account History sync is a separate opt-in: it reads your YouTube History through YouTube's own same-origin endpoint, stores only an account-scoped digest locally, and never sends your progress to a third-party server. Unknown accounts are not synced.</p>
       <button id="yst2-clear-progress" class="yst2-subbtn">Clear playback progress (keep series)</button>
       <button id="yst2-clear-history" class="yst2-subbtn">Clear History matches</button>
       <p class="yst2-muted">Progress is stored in this Firefox profile on YouTube. It does not sync to Morphe or your Google account. You can export a backup at any time.</p>
@@ -1988,8 +2005,10 @@
     p.querySelector('#yst2-player-visible')?.addEventListener('change',e=>{db.settings.showPlayerButton=e.target.checked;saveDB();addPlayerButton();});
     p.querySelector('#yst2-record-progress')?.addEventListener('change',async e=>{const enabled=e.target.checked;if(!enabled){db.settings.recordPlaybackProgress=false;privacy.consentAccount='';savePrivacy();saveDB();activePlaybackSession=null;privacyGeneration++;return;}e.target.disabled=true;try{const digest=await refreshAccountContext();if(!digest){e.target.checked=false;toast('Sign in to YouTube before enabling account-bound progress recording.');return;}if(!confirm('Enable local playback recording for this YouTube account? Progress stays in this browser. It is disabled automatically when the active account changes; no account identifier is stored or sent.')){e.target.checked=false;return;}privacy.consentAccount=digest;savePrivacy();db.settings.recordPlaybackProgress=true;saveDB();privacyGeneration++;toast('Playback recording enabled for this account.');}finally{e.target.disabled=false;}});
     p.querySelector('#yst2-import-history')?.addEventListener('change',e=>{db.settings.importHistoryProgress=e.target.checked;saveDB();if(location.pathname.startsWith('/feed/history'))scanHistoryPage(true);});
+    p.querySelector('#yst2-sync-youtube')?.addEventListener('change',async e=>{const enabled=e.target.checked;if(!enabled){db.settings.syncYouTubeProgress=false;privacy.syncAccount='';savePrivacy();saveDB();privacyGeneration++;return;}e.target.disabled=true;try{const digest=await refreshAccountContext();if(!digest){e.target.checked=false;toast('Sign in to YouTube before enabling History sync.');return;}if(!confirm('Allow this tracker to read your YouTube History for followed episodes on this account? Only matching episode progress is stored locally; no account identifier or progress is sent to a third party.')){e.target.checked=false;return;}privacy.syncAccount=digest;savePrivacy();db.settings.syncYouTubeProgress=true;saveDB();privacyGeneration++;syncYouTubeHistory(true);}finally{e.target.disabled=false;}});
+    p.querySelector('#yst2-sync-history-now')?.addEventListener('click',()=>syncYouTubeHistory(true));
     p.querySelector('#yst2-auto-catalog')?.addEventListener('change',e=>{db.settings.catalogAutoRefresh=e.target.checked;saveDB();if(e.target.checked)refreshStaleSeries();});
-    p.querySelector('#yst2-clear-progress')?.addEventListener('click',()=>{if(confirm('Clear all playback positions and watched states but keep series catalogs?')){rememberDatabaseUndo('clear playback progress');db.episodes={};saveDB();renderPanel();toast('Playback progress cleared. Undo is available for 8 seconds.');}});
+    p.querySelector('#yst2-clear-progress')?.addEventListener('click',()=>{if(confirm('Clear all playback positions and watched states but keep series catalogs?')){rememberDatabaseUndo('clear playback progress');const clearedAt=Date.now();for(const id of Object.keys(db.episodes))privacy.clearedProgressAt[id]=clearedAt;savePrivacy();db.episodes={};saveDB();renderPanel();toast('Playback progress cleared. Undo is available for 8 seconds.');}});
     p.querySelector('#yst2-clear-history')?.addEventListener('click',()=>{if(confirm('Clear local History matches only?')){rememberDatabaseUndo('clear History matches');db.history={};saveDB();renderPanel();toast('History matches cleared. Undo is available for 8 seconds.');}});
     p.querySelector('#yst2-clear')?.addEventListener('click',()=>{if(confirm('Permanently delete all series, episode progress, and History matches?')){rememberDatabaseUndo('delete all tracker data');db=emptyDB();saveDB();renderPanel();toast('Tracker data deleted. Undo is available for 8 seconds.');}});
     p.querySelector('#yst2-recount')?.addEventListener('click',()=>{rememberUndo(Object.keys(db.episodes),'recalculate completion');for(const [id,st] of Object.entries(db.episodes)){setState(id,{watched:shouldAutoComplete(st.position,st.duration,Number(db.settings.watchedThreshold),Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS)),completionOverride:'AUTO'},false);}saveDB();renderPanel();toast('Automatic completion recalculated.');});
@@ -3036,6 +3055,7 @@
         if(s && Date.now()-last>15*60*1000){sessionStorage.setItem(AUTO_SYNC_KEY,String(Date.now()));syncCurrentPlaylist();}
       }
       observeHistoryPage();
+      if(location.pathname.startsWith('/feed/history')&&syncAllowed())syncYouTubeHistory(false);
       if(staleRefreshTimer)clearTimeout(staleRefreshTimer);
       staleRefreshTimer=setTimeout(refreshStaleSeries,1200);
     },450);
