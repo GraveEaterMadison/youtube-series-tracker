@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.8.0
+
+- Add a full-height, theme-aware YouTube History-style library surface with compact media cards and responsive spacing.
+- Preserve the existing library, episode, history, backup, settings, and playback workflows.
+
+
 ## 2.7.0
 
 - Add Follow by pasted playlist URL or ID, with a guided order/start-episode selector and optional marking of preceding episodes watched.

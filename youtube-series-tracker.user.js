@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Series Tracker
 // @namespace    https://github.com/GraveEaterMadison/youtube-series-tracker
-// @version      2.7.0
+// @version      2.8.0
 // @description  Follow YouTube playlists as series with guided setup, local progress, resume planning, History matching, and validated backup/restore.
 // @author       Zero
 // @license      MIT
@@ -2794,7 +2794,60 @@
       #yst2-panel .yst2-candidate-copy strong{font-size:12px;line-height:1.4;overflow-wrap:anywhere}
       #yst2-panel .yst2-candidate-copy small{font-size:10px;color:#a0a5b2}
       #yst2-panel .yst2-candidate-arrow{font-size:22px;color:#a6abba}
-    `;document.head.appendChild(st);
+
+      /* Morphe Series Tracker parity: History-style library surface and compact media rows. */
+      #yst2-history-switcher{display:flex;align-items:center;gap:8px;margin:12px 0 16px;padding:0 16px;border-bottom:1px solid var(--yt-spec-10-percent-layer,#e5e5e5);font:500 14px Roboto,Arial,sans-serif}
+      #yst2-history-switcher button{position:relative;min-height:44px;padding:0 14px;border:0;border-radius:0;background:transparent;color:var(--yt-spec-text-secondary,#606060);font:inherit;cursor:pointer}
+      #yst2-history-switcher button[aria-selected="true"]{color:var(--yt-spec-text-primary,#0f0f0f)}
+      #yst2-history-switcher button[aria-selected="true"]:after{content:"";position:absolute;left:12px;right:12px;bottom:0;height:3px;border-radius:3px 3px 0 0;background:var(--yt-spec-call-to-action,#065fd4)}
+      #${PANEL}{position:fixed;inset:0;z-index:999999;width:100vw;height:100dvh;max-height:100dvh;border:0;border-radius:0;background:var(--yt-spec-base-background,#fff);color:var(--yt-spec-text-primary,#0f0f0f);box-shadow:none;font:14px/1.45 Roboto,Arial,sans-serif}
+      #${PANEL}.open{display:flex;flex-direction:column}
+      #${PANEL} .yst2-top,#${PANEL} .yst2-dashboard,#${PANEL} .yst2-toolbar,#${PANEL} .yst2-tabs{background:var(--yt-spec-base-background,#fff);border-color:var(--yt-spec-10-percent-layer,#e5e5e5)}
+      #${PANEL} .yst2-top{min-height:58px;padding:6px max(16px,calc((100vw - 1000px)/2))}
+      #${PANEL} .yst2-brand-mark{width:32px;height:32px;border-radius:8px;box-shadow:none}
+      #${PANEL} .yst2-logo{font-size:18px;color:var(--yt-spec-text-primary,#0f0f0f);letter-spacing:0;font-weight:600}
+      #${PANEL} .yst2-tagline{display:none}
+      #${PANEL} .yst2-close{background:transparent;border:0;color:var(--yt-spec-text-primary,#0f0f0f)}
+      #${PANEL} .yst2-dashboard{display:none}
+      #${PANEL} .yst2-toolbar{padding:12px max(16px,calc((100vw - 1000px)/2));border-bottom:1px solid var(--yt-spec-10-percent-layer,#e5e5e5)}
+      #${PANEL} .yst2-primary-actions{gap:8px}
+      #${PANEL} .yst2-mainbtn{background:var(--yt-spec-call-to-action,#065fd4);box-shadow:none;border-radius:18px;color:#fff}
+      #${PANEL} .yst2-subbtn,#${PANEL} .yst2-icon{background:var(--yt-spec-badge-chip-background,#f2f2f2);border:0;color:var(--yt-spec-text-primary,#0f0f0f);box-shadow:none}
+      #${PANEL} .yst2-tabs{padding:0 max(16px,calc((100vw - 1000px)/2));gap:4px;border-bottom:1px solid var(--yt-spec-10-percent-layer,#e5e5e5)}
+      #${PANEL} .yst2-tabs button{border:0;border-radius:0;color:var(--yt-spec-text-secondary,#606060);background:transparent}
+      #${PANEL} .yst2-tabs button.active{color:var(--yt-spec-text-primary,#0f0f0f);background:transparent;border-bottom:3px solid var(--yt-spec-call-to-action,#065fd4)}
+      #${PANEL} .yst2-searchwrap{max-width:968px;width:calc(100% - 32px);margin:16px auto 4px;border-radius:22px;background:var(--yt-spec-badge-chip-background,#f2f2f2);border-color:transparent}
+      #${PANEL} .yst2-searchwrap input{color:var(--yt-spec-text-primary,#0f0f0f)}
+      #${PANEL} .yst2-searchwrap input::placeholder{color:var(--yt-spec-text-secondary,#606060)}
+      #${PANEL} .yst2-content{width:100%;max-width:1000px;margin:0 auto;padding:12px 16px 32px;scrollbar-color:var(--yt-spec-10-percent-layer,#aaa) transparent}
+      #${PANEL} .yst2-series{background:transparent;border:0;border-bottom:1px solid var(--yt-spec-10-percent-layer,#e5e5e5);border-radius:0;padding:14px 0;margin:0;box-shadow:none}
+      #${PANEL} .yst2-series-overview{gap:16px}
+      #${PANEL} .yst2-series-art{width:120px;min-width:120px;aspect-ratio:16/9;border:0;border-radius:8px;background:var(--yt-spec-badge-chip-background,#f2f2f2)}
+      #${PANEL} .yst2-series-art:after{display:none}
+      #${PANEL} .yst2-series-art>span{bottom:5px;left:5px}
+      #${PANEL} .yst2-seriestitle{font-size:14px;font-weight:600;color:var(--yt-spec-text-primary,#0f0f0f)}
+      #${PANEL} .yst2-muted,#${PANEL} .yst2-series-footline{color:var(--yt-spec-text-secondary,#606060)}
+      #${PANEL} .yst2-bar{background:var(--yt-spec-10-percent-layer,#e5e5e5)}
+      #${PANEL} .yst2-bar i{background:var(--yt-spec-call-to-action,#065fd4)}
+      #${PANEL} .yst2-progress-label{color:var(--yt-spec-text-secondary,#606060)}
+      #${PANEL} .yst2-continue{background:var(--yt-spec-badge-chip-background,#f2f2f2);border:0;border-radius:8px;color:var(--yt-spec-text-primary,#0f0f0f)}
+      #${PANEL} .yst2-continue-copy small{color:var(--yt-spec-text-secondary,#606060)}
+      #${PANEL} .yst2-continue-icon{background:var(--yt-spec-call-to-action,#065fd4)}
+      #${PANEL} .yst2-details{border-top:1px solid var(--yt-spec-10-percent-layer,#e5e5e5)}
+      #${PANEL} .yst2-details summary{color:var(--yt-spec-text-primary,#0f0f0f)}
+      #${PANEL} .yst2-ep{border-bottom-color:var(--yt-spec-10-percent-layer,#e5e5e5)}
+      #${PANEL} .yst2-epname{color:var(--yt-spec-text-primary,#0f0f0f)}
+      #${PANEL} .yst2-epname:hover{color:var(--yt-spec-call-to-action,#065fd4)}
+      #${PANEL} .yst2-thumb{border:0;border-radius:8px}
+      #${PANEL} .yst2-footer{background:var(--yt-spec-base-background,#fff);border-color:var(--yt-spec-10-percent-layer,#e5e5e5);color:var(--yt-spec-text-secondary,#606060)}
+      #${PANEL} .yst2-series h3{color:var(--yt-spec-text-primary,#0f0f0f)}
+      #${PANEL} .yst2-setting{color:var(--yt-spec-text-primary,#0f0f0f)}
+      #${PANEL} .yst2-setting select,#${PANEL} .yst2-dialog-input,#${PANEL} .yst2-dialog-select{background:var(--yt-spec-badge-chip-background,#f2f2f2);color:var(--yt-spec-text-primary,#0f0f0f);border-color:var(--yt-spec-10-percent-layer,#e5e5e5)}
+      #${PANEL} .yst2-modal{background:var(--yt-spec-base-background,#fff);color:var(--yt-spec-text-primary,#0f0f0f);border-color:var(--yt-spec-10-percent-layer,#e5e5e5)}
+      #${PANEL} .yst2-modal-head h3,#${PANEL} .yst2-dialog-label{color:var(--yt-spec-text-primary,#0f0f0f)}
+      #${PANEL} .yst2-candidate{background:var(--yt-spec-badge-chip-background,#f2f2f2);color:var(--yt-spec-text-primary,#0f0f0f);border-color:var(--yt-spec-10-percent-layer,#e5e5e5)}
+      @media(max-width:600px){#${PANEL}{inset:0;width:100vw;height:100dvh}#${PANEL} .yst2-toolbar{padding:10px 12px;flex-wrap:wrap}#${PANEL} .yst2-primary-actions{flex-wrap:wrap}#${PANEL} .yst2-data-actions{margin-left:auto}#${PANEL} .yst2-series-art{width:96px;min-width:96px}#${PANEL} .yst2-series-overview{gap:10px}#${PANEL} .yst2-serieshead{flex-wrap:wrap}}
+        `;document.head.appendChild(st);
   }
   function trackCurrentVideo() {
     if (db.settings.enabled === false) { if(activeVideoCleanup){activeVideoCleanup();activeVideoCleanup=null;} currentVideoId='';activeVideo=null;activePlaybackSession=null;return; }
