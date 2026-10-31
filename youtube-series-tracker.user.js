@@ -2365,8 +2365,9 @@
   }
   async function syncYouTubeHistory(force = false) {
     if (historySyncBusy || !syncAllowed()) return;
-    if (!force && historySyncLastAt && Date.now() - historySyncLastAt < 5 * 60 * 1000) return;
+    if (!force && historySyncLastAt && Date.now() - historySyncLastAt < 30 * 1000) return;
     historySyncBusy = true;
+    historySyncLastAt = Date.now();
     const initialGeneration = privacyGeneration;
     const initialAccount = activeAccountDigest;
     let changed = false, imported = 0, pages = 0;
@@ -2958,7 +2959,7 @@
     addPlaylistFollowButton();
     addHistorySwitcher();
   }
-  function openPanel(){if(db.settings.enabled===false)activeTab='settings';document.getElementById(PANEL)?.classList.add('open');renderPanel();}
+  function openPanel(){if(db.settings.enabled===false)activeTab='settings';document.getElementById(PANEL)?.classList.add('open');renderPanel();refreshAccountContext().then(()=>{if(syncAllowed())syncYouTubeHistory(false);}).catch(()=>{});}
   function closePanel(){document.getElementById(PANEL)?.classList.remove('open');}
   function togglePanel(){document.getElementById(PANEL)?.classList.contains('open')?closePanel():openPanel();}
   function toast(message) {
@@ -3316,6 +3317,7 @@
     if(tickTimer)clearInterval(tickTimer);
     tickTimer=setInterval(()=>{
       refreshAccountContext().catch(()=>{});
+      if(syncAllowed()&&document.getElementById(PANEL)?.classList.contains('open')&&Date.now()-historySyncLastAt>=30*1000)syncYouTubeHistory(false);
       if(getVideoId() && (getVideoId()!==currentVideoId || document.querySelector('video')!==activeVideo))trackCurrentVideo();
       if(db.settings.showSidebarButton!==false&&!document.getElementById(BTN)) addSidebarButton();
       addPlayerButton();
