@@ -756,6 +756,13 @@ test('History page gets a non-destructive Series entry point', () => {
 
 
 
+
+test('Series episode launch always passes an explicit zero or resume timestamp', () => {
+  assert.match(source, /const startAt=resume&&!startsHere&&!isWatched\(e\.id\)\?Math\.max\(0,Number\(st\.position\)\|\|0\):0/);
+  assert.match(source, /destination\.searchParams\.set\('t',Math\.floor\(startAt\)\+'s'\)/);
+});
+
+
 test('native YouTube player navigation follows an explicitly started Series session', () => {
   assert.match(source, /const SERIES_SESSION_KEY = 'yst2-series-playback-session'/);
   assert.match(source, /function readSeriesPlaybackSession\(\)/);
