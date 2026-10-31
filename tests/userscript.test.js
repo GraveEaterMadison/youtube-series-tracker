@@ -748,7 +748,7 @@ test('History page gets a non-destructive Series entry point', () => {
 
 test('validated native Morphe backups retain bookmark video references', () => {
   const validator = source.slice(source.indexOf('function validateBackupDocument(document)'), source.indexOf('function exportBackup()'));
-  assert.match(validator, /const bookmarkVideoId = \^\[A-Za-z0-9_-\]\{11\}\$/);
+  assert.ok(validator.includes("const bookmarkVideoId = /^[A-Za-z0-9_-]{11}$/.test"));
   assert.match(validator, /bookmarkVideoId,/);
   assert.match(source, /if \(db\.settings\.enabled === false \|\| !onHistory\)/);
 });
