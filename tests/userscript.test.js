@@ -889,3 +889,36 @@ test('validated native Morphe backups retain bookmark video references', () => {
   assert.match(validator, /bookmarkVideoId,/);
   assert.match(source, /if \(db\.settings\.enabled === false \|\| !onHistory\)/);
 });
+
+
+test('keyboard shortcuts toggle the popup, close it with Escape, and ignore editable controls', () => {
+  const handle = vm.runInNewContext(`(${extractSimpleFunction(source, 'handleTrackerKeyboardShortcuts')})`, {
+    PANEL: 'panel',
+    document: { getElementById: () => panel },
+    togglePanel: () => { toggles++; },
+    closePanel: () => { closes++; }
+  });
+  let toggles = 0;
+  let closes = 0;
+  const panel = { classList: { contains: value => value === 'open' } };
+  const event = (overrides = {}) => ({
+    key: 'y', altKey: true, shiftKey: true, ctrlKey: false, metaKey: false,
+    target: { tagName: 'BODY', isContentEditable: false },
+    preventDefault() { this.prevented = true; },
+    ...overrides
+  });
+  const shortcut = event();
+  handle(shortcut);
+  assert.equal(toggles, 1);
+  assert.equal(shortcut.prevented, true);
+
+  handle(event({ target: { tagName: 'INPUT' } }));
+  handle(event({ target: { tagName: 'TEXTAREA' } }));
+  handle(event({ target: { tagName: 'DIV', isContentEditable: true } }));
+  assert.equal(toggles, 1);
+
+  handle(event({ key: 'Escape', altKey: false, shiftKey: false }));
+  assert.equal(closes, 1);
+  handle(event({ key: 'Escape', altKey: false, shiftKey: false, target: { closest: () => ({}) } }));
+  assert.equal(closes, 1);
+});
