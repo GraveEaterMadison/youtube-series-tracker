@@ -292,7 +292,8 @@
       database: {
         series: JSON.parse(JSON.stringify(db.series)),
         episodes: JSON.parse(JSON.stringify(db.episodes)),
-        history: JSON.parse(JSON.stringify(db.history))
+        history: JSON.parse(JSON.stringify(db.history)),
+        clearedProgressAt: { ...privacy.clearedProgressAt }
       },
       description,
       expiresAt: Date.now() + UNDO_WINDOW_MS
@@ -310,6 +311,8 @@
       db.series = JSON.parse(JSON.stringify(lastUndo.database.series));
       db.episodes = JSON.parse(JSON.stringify(lastUndo.database.episodes));
       db.history = JSON.parse(JSON.stringify(lastUndo.database.history));
+      if (lastUndo.database.clearedProgressAt) privacy.clearedProgressAt = { ...lastUndo.database.clearedProgressAt };
+      savePrivacy();
     }
     for (const [id, old] of Object.entries(lastUndo.before || {})) {
       if (old === null) delete db.episodes[id];
@@ -2012,7 +2015,7 @@
     p.querySelector('#yst2-auto-catalog')?.addEventListener('change',e=>{db.settings.catalogAutoRefresh=e.target.checked;saveDB();if(e.target.checked)refreshStaleSeries();});
     p.querySelector('#yst2-clear-progress')?.addEventListener('click',()=>{if(confirm('Clear all playback positions and watched states but keep series catalogs?')){rememberDatabaseUndo('clear playback progress');const clearedAt=Date.now();for(const id of Object.keys(db.episodes))privacy.clearedProgressAt[id]=clearedAt;savePrivacy();db.episodes={};saveDB();renderPanel();toast('Playback progress cleared. Undo is available for 8 seconds.');}});
     p.querySelector('#yst2-clear-history')?.addEventListener('click',()=>{if(confirm('Clear local History matches only?')){rememberDatabaseUndo('clear History matches');db.history={};saveDB();renderPanel();toast('History matches cleared. Undo is available for 8 seconds.');}});
-    p.querySelector('#yst2-clear')?.addEventListener('click',()=>{if(confirm('Permanently delete all series, episode progress, and History matches?')){rememberDatabaseUndo('delete all tracker data');db=emptyDB();saveDB();renderPanel();toast('Tracker data deleted. Undo is available for 8 seconds.');}});
+    p.querySelector('#yst2-clear')?.addEventListener('click',()=>{if(confirm('Permanently delete all series, episode progress, and History matches?')){rememberDatabaseUndo('delete all tracker data');const clearedAt=Date.now();for(const id of Object.keys(db.episodes))privacy.clearedProgressAt[id]=clearedAt;savePrivacy();db=emptyDB();saveDB();renderPanel();toast('Tracker data deleted. Undo is available for 8 seconds.');}});
     p.querySelector('#yst2-recount')?.addEventListener('click',()=>{rememberUndo(Object.keys(db.episodes),'recalculate completion');for(const [id,st] of Object.entries(db.episodes)){setState(id,{watched:shouldAutoComplete(st.position,st.duration,Number(db.settings.watchedThreshold),Number(db.settings.watchedRemainingSeconds ?? AUTO_WATCHED_REMAINING_SECONDS)),completionOverride:'AUTO'},false);}saveDB();renderPanel();toast('Automatic completion recalculated.');});
     p.querySelector('#yst2-markall')?.addEventListener('click',()=>{const s=findSeries(getPlaylistId());if(!s){toast('Open a tracked series playlist first.');return;}const playable=s.episodes.filter(e=>e.available!==false&&!e.unavailable&&/^[A-Za-z0-9_-]{11}$/.test(e.id));if(confirm(`Mark all ${playable.length} playable episodes watched?`)){rememberUndo(playable.map(e=>e.id),'mark all episodes watched');const now=Date.now();for(const e of playable){const old=stateFor(e.id);const already=isWatched(e.id);db.episodes[e.id]={...old,watched:true,completionOverride:'WATCHED',position:old.duration||e.duration||old.position,duration:old.duration||e.duration||0,updatedAt:now,lastWatchedAt:already?old.lastWatchedAt:now};}saveDB();renderPanel();toast('All playable episodes marked watched.');}});
     p.querySelector('#yst2-scanhistory')?.addEventListener('click',scanHistoryPage);
