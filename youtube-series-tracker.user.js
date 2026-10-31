@@ -3227,9 +3227,11 @@
 
   function handleOwnedSeriesRouteChange(nextVideoId) {
     const owned = activePlaybackSession || readSeriesPlaybackSession();
-    if (!owned || !nextVideoId || nextVideoId === owned.videoId) return false;
+    if (!owned || !nextVideoId) return false;
     const series = findSeries(owned.seriesId);
     if (!series) { clearSeriesPlaybackSession(); return false; }
+    const incomingOccurrence = episodeOccurrence(series, nextVideoId, series.playlistId === getPlaylistId() ? currentPlaylistIndex() : -1);
+    if (nextVideoId === owned.videoId && incomingOccurrence?.order === Number(owned.order)) return false;
     const episodes = orderedEpisodes(series).filter(ep => ep.available !== false && !ep.unavailable && /^[A-Za-z0-9_-]{11}$/.test(ep.id));
     const currentIndex = episodes.findIndex(ep => ep.id === owned.videoId && ep.order === Number(owned.order));
     const expected = currentIndex >= 0 ? episodes[currentIndex + 1] : null;
