@@ -173,7 +173,7 @@ test('library UI uses compact popup, creator branding, profile link, and respons
   assert.match(source, /prefers-reduced-motion:reduce/);
   assert.match(source, /zeroyogurt edition/);
   assert.match(source, /Made by zeroyogurt/);
-  assert.match(source, /https:\\/\\/github\\.com\\/GraveEaterMadison/);
+  assert.ok(source.includes("https://github.com/GraveEaterMadison"), "creator profile link should be present");
   assert.match(source, /width:min\\(490px,calc\\(100vw - 32px\\)\\)/);
   assert.doesNotMatch(source, /inset:0;width:100vw;height:100dvh/);
 });
