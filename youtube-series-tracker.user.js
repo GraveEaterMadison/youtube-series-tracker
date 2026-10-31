@@ -53,6 +53,9 @@
   const discoveryCache = new Map();
   let currentHistoryScan = '';
   let activeVideoCleanup = null;
+  let historyObserver = null;
+  let historyObserverRoot = null;
+  let historyScanTimer = null;
 
   function emptyDB() {
     return {
@@ -93,7 +96,6 @@
         cursorRevision: Number.isInteger(item.cursorRevision) ? item.cursorRevision : 0,
         newEpisodeIds: Array.isArray(item.newEpisodeIds) ? item.newEpisodeIds.filter(id => /^[A-Za-z0-9_-]{11}$/.test(id)) : [],
         startHereVideoId: /^[A-Za-z0-9_-]{11}$/.test(String(item.startHereVideoId || '')) ? item.startHereVideoId : '',
-        bookmarkVideoId: /^[A-Za-z0-9_-]{11}$/.test(String(item.bookmarkVideoId || '')) ? item.bookmarkVideoId : '',
         bookmarkVideoId: /^[A-Za-z0-9_-]{11}$/.test(String(item.bookmarkVideoId || '')) ? item.bookmarkVideoId : '',
         startHereOrder: Number.isInteger(item.startHereOrder) ? item.startHereOrder : -1,
         lastRefreshAttemptAt: Number(item.lastRefreshAttemptAt) || 0,
@@ -1835,11 +1837,11 @@
       <label class="yst2-setting"><input type="checkbox" id="yst2-autosync" ${s.autoSyncOnOpen?'checked':''}> Automatically refresh the current tracked playlist when opened</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-sidebar" ${s.showSidebarButton!==false?'checked':''}> Show Series in YouTube navigation</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-player-visible" ${s.showPlayerButton!==false?'checked':''}> Show Series and previous/next controls in the player</label>
-      <label class="yst2-setting"><input type="checkbox" id="yst2-record-progress" ${s.recordPlaybackProgress!==false?'checked':''}> Record local playback progress for followed episodes</label>
+      <label class="yst2-setting"><input type="checkbox" id="yst2-record-progress" ${s.recordPlaybackProgress?'checked':''}> Record local playback progress for followed episodes</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-import-history" ${s.importHistoryProgress?'checked':''}> Use visible History progress bars for completion</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-auto-catalog" ${s.catalogAutoRefresh!==false?'checked':''}> Refresh stale followed playlists automatically</label>
       <label class="yst2-setting"><input type="checkbox" id="yst2-historyscan" ${s.historyScan?'checked':''}> Match YouTube History page videos to known episodes</label>
-      <p class="yst2-muted">History import uses only progress indicators currently rendered on the History page. It never reads account identifiers or sends progress to a server.</p>
+      <p class="yst2-muted">History import uses only progress indicators currently rendered on the History page. Newly loaded entries are rescanned automatically as you scroll. It never reads account identifiers or sends progress to a server.</p>
       <button id="yst2-clear-progress" class="yst2-subbtn">Clear playback progress (keep series)</button>
       <button id="yst2-clear-history" class="yst2-subbtn">Clear History matches</button>
       <p class="yst2-muted">Progress is stored in this Firefox profile on YouTube. It does not sync to Morphe or your Google account. You can export a backup at any time.</p>
@@ -2204,34 +2206,79 @@
     }
     return null;
   }
-  function scanHistoryPage() {
-    if (!location.pathname.startsWith('/feed/history')) { toast('Open youtube.com/feed/history first, then select Scan History.'); return; }
+  function scanHistoryPage(quiet = false) {
+    if (!location.pathname.startsWith('/feed/history')) {
+      if (!quiet) toast('Open youtube.com/feed/history first, then select Scan History.');
+      return 0;
+    }
     const matched = new Set(db.series.flatMap(s=>s.episodes.map(e=>e.id)));
-    let count=0;
+    let count=0, changed=false;
+    const durationById = new Map();
+    for (const series of db.series) for (const episode of series.episodes) {
+      if (!durationById.has(episode.id) && Number(episode.duration)>0) durationById.set(episode.id,Number(episode.duration));
+    }
     for(const node of document.querySelectorAll('ytd-video-renderer,ytd-grid-video-renderer,ytd-rich-item-renderer')) {
       const a=node.querySelector('a#video-title, a#thumbnail[href*="watch"]');if(!a)continue;
       try {
         const id=new URL(a.href,location.origin).searchParams.get('v');if(!id||!matched.has(id))continue;
         const title=text(node.querySelector('#video-title'))||a.title||stateFor(id).title;
         const percent = historyProgressPercent(node);
+        const signature = String(percent ?? '') + ':' + String(text(node.querySelector('#video-title')) || title);
         const previous = db.history[id] || {};
-        db.history[id] = {
-          title,
-          lastSeen: Date.now(),
-          percent,
-          signature: String(percent ?? '') + ':' + String(text(node.querySelector('#video-title')) || title)
-        };
+        if (previous.signature !== signature || !previous.lastSeen) {
+          db.history[id] = { title, lastSeen: Date.now(), percent, signature };
+          changed=true;
+        }
         count++;
-        if (db.settings.importHistoryProgress && percent !== null && shouldAutoCompletePercentage(percent, stateFor(id).duration || db.series.flatMap(series=>series.episodes).find(ep=>ep.id===id)?.duration || 0)) {
+        if (db.settings.importHistoryProgress && percent !== null
+            && shouldAutoCompletePercentage(percent, stateFor(id).duration || durationById.get(id) || 0)) {
           const state = stateFor(id);
-          if (state.completionOverride !== 'UNWATCHED' && state.completionOverride !== 'WATCHED') {
+          if (!state.watched && state.completionOverride !== 'UNWATCHED' && state.completionOverride !== 'WATCHED') {
             setState(id,{watched:true,completionOverride:'AUTO'},false);
+            changed=true;
           }
         }
       }catch(_){}
     }
-    saveDB();renderPanel();toast(`History scan found ${count} tracked episode(s). Scroll down to load more history, then scan again.`);
+    if (changed) saveDB();
+    if (changed && document.getElementById(PANEL)?.classList.contains('open')) renderPanel();
+    if (!quiet) toast('History scan found ' + count + ' tracked episode(s). Newly loaded History entries are scanned automatically as you scroll.');
+    return count;
   }
+
+  function observeHistoryPage() {
+    const onHistory = location.pathname.startsWith('/feed/history');
+    if (!onHistory || db.settings.enabled === false || db.settings.historyScan === false) {
+      if (historyObserver) historyObserver.disconnect();
+      historyObserver = null;
+      historyObserverRoot = null;
+      if (historyScanTimer) clearTimeout(historyScanTimer);
+      historyScanTimer = null;
+      return;
+    }
+    const root = document.querySelector('ytd-browse[page-subtype="history"] #contents')
+      || document.querySelector('ytd-browse[page-subtype="history"] #primary')
+      || document.querySelector('ytd-browse[page-subtype="history"]');
+    if (!root || root === historyObserverRoot) return;
+    if (historyObserver) historyObserver.disconnect();
+    historyObserverRoot = root;
+    historyObserver = new MutationObserver(records => {
+      const relevant = records.some(record => {
+        const target = record.target && (record.target.nodeType === 1 ? record.target : record.target.parentElement);
+        return !target || !target.closest || !target.closest('#yst2-panel');
+      });
+      if (!relevant) return;
+      if (historyScanTimer) clearTimeout(historyScanTimer);
+      historyScanTimer = setTimeout(() => {
+        historyScanTimer = null;
+        if (root.isConnected && location.pathname.startsWith('/feed/history')) scanHistoryPage(true);
+        else observeHistoryPage();
+      }, 800);
+    });
+    historyObserver.observe(root,{childList:true,subtree:true});
+    scanHistoryPage(true);
+  }
+
   function addHistorySwitcher() {
     const onHistory = location.pathname.startsWith('/feed/history');
     const existing = document.getElementById('yst2-history-switcher');
@@ -2912,7 +2959,7 @@
         const id=getPlaylistId(), s=findSeries(id), last=Number(sessionStorage.getItem(AUTO_SYNC_KEY)||0);
         if(s && Date.now()-last>15*60*1000){sessionStorage.setItem(AUTO_SYNC_KEY,String(Date.now()));syncCurrentPlaylist();}
       }
-      if(location.pathname.startsWith('/feed/history')&&db.settings.historyScan) scanHistoryPage();
+      observeHistoryPage();
       if(staleRefreshTimer)clearTimeout(staleRefreshTimer);
       staleRefreshTimer=setTimeout(refreshStaleSeries,1200);
     },450);
@@ -2923,6 +2970,7 @@
       addPlayerButton();
       addPlaylistFollowButton();
       addHistorySwitcher();
+      if (location.pathname.startsWith('/feed/history')) observeHistoryPage();
     });
     mo.observe(document.documentElement,{childList:true,subtree:true});
   }
