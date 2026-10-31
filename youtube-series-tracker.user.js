@@ -1933,7 +1933,7 @@
       <button id="yst2-clear-progress" class="yst2-subbtn">Clear playback progress (keep series)</button>
       <button id="yst2-clear-history" class="yst2-subbtn">Clear History matches</button>
       <p class="yst2-muted">Progress is stored in this Firefox profile on YouTube. It does not sync to Morphe or your Google account. You can export a backup at any time.</p>
-      <button id="yst2-clear" class="yst2-subbtn dangerbtn">Delete all series and progress</button></section>
+      <button id="yst2-clear" class="yst2-subbtn dangerbtn">Delete all series and progress</button><p class="yst2-muted">Modified browser adaptation of thryyy/morphe-series-tracker and Morphe Patches. Distributed under GPL-3.0-only with required notices. <a href="https://github.com/GraveEaterMadison/youtube-series-tracker/blob/feature/morphe-style-auto-follow/LICENSE" target="_blank" rel="noopener">License</a> · <a href="https://github.com/GraveEaterMadison/youtube-series-tracker/blob/feature/morphe-style-auto-follow/NOTICE" target="_blank" rel="noopener">Notices</a></p></section>
       <section class="yst2-series"><h3>Data tools</h3><button id="yst2-recount" class="yst2-subbtn">Recalculate watched status from saved positions</button><button id="yst2-markall" class="yst2-subbtn">Mark current series watched</button></section>`;
   }
   function renderHistory() {
