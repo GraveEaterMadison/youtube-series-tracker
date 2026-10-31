@@ -1398,7 +1398,7 @@
     if(nativeOwned&&(!activePlaybackSession||activePlaybackSession.videoId!==videoId))return false;
     const requestedOrder=series.playlistId===listId?currentPlaylistIndex():-1;
     const occurrence=episodeOccurrence(series,videoId,requestedOrder);
-    if(!occurrence){toast('Could not identify this episode occurrence.');return false;}
+    if(!occurrence){toast('Could not identify this episode occurrence.');return nativeOwned;}
     const episodes=orderedEpisodes(series).filter(ep=>ep.available!==false&&!ep.unavailable&&/^[A-Za-z0-9_-]{11}$/.test(ep.id));
     const index=episodes.findIndex(ep=>ep.id===videoId&&ep.order===occurrence.order);
     const target=episodes[index+direction];
@@ -3278,7 +3278,7 @@
     if (document.documentElement.dataset.yst2NativeNavigation === '1') return;
     document.documentElement.dataset.yst2NativeNavigation = '1';
     document.addEventListener('click', event => {
-      const target = event.target && event.target.closest && event.target.closest('#movie_player .ytp-next-button, #movie_player .ytp-prev-button');
+      const target = event.target && event.target.closest && event.target.closest('#movie_player .ytp-next-button, #movie_player .ytp-prev-button, #movie_player .ytp-autonav-endscreen-upnext-container, #movie_player .ytp-autonav-endscreen-upnext-button');
       if (target && activePlaybackSession) {
         const direction = target.matches('.ytp-prev-button') ? -1 : 1;
         if (navigateSeries(direction, true)) {
