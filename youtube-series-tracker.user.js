@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         YouTube Series Tracker
 // @namespace    https://github.com/GraveEaterMadison/youtube-series-tracker
-// @version      2.8.0
+// @version      2.9.0
 // @description  Follow YouTube playlists as series with guided setup, local progress, resume planning, History matching, and validated backup/restore.
 // @author       Zero
-// @license      MIT
+// @license      GPL-3.0-only
 // @homepageURL  https://github.com/GraveEaterMadison/youtube-series-tracker
 // @supportURL   https://github.com/GraveEaterMadison/youtube-series-tracker/issues
 // @compatible   firefox
