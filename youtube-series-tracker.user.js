@@ -1805,7 +1805,7 @@
       ${activeTab === 'settings' ? '' : `<div class="yst2-searchwrap"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"></circle><path d="m16 16 5 5"></path></svg><input id="yst2-search" type="search" value="${esc(librarySearch)}" placeholder="${activeTab==='history'?'Search history matches':'Search series and episodes'}" aria-label="Search ${activeTab==='history'?'history matches':'series and episodes'}"><kbd>⌕</kbd></div>`}
       <div id="yst2-search-empty" class="yst2-search-empty" hidden>No matches. Try another title.</div>
       <div class="yst2-content">${body}</div>
-      <footer class="yst2-footer"><span class="yst2-privacy"><span></span> Stored locally in this browser</span><span>${db.lastSync?`Synced ${new Date(db.lastSync).toLocaleDateString()}`:'Not synced yet'}</span>${lastUndo?'<button id="yst2-undo" class="yst2-subbtn" type="button">Undo last change</button>':''}</footer>`;
+      <footer class="yst2-footer"><span class="yst2-privacy"><span></span> Stored locally</span><span class="yst2-credit"><span class="yst2-credit-mark">✦</span> Made by zeroyogurt</span><span>${db.lastSync?`Synced ${new Date(db.lastSync).toLocaleDateString()}`:'Not synced yet'}</span>${lastUndo?'<button id="yst2-undo" class="yst2-subbtn" type="button">Undo last change</button>':''}</footer>`;
     bindPanel();
     for (const [id, state] of episodeUiState) {
       const details = p.querySelector('details[data-series-details="' + CSS.escape(id) + '"]');
@@ -2795,58 +2795,45 @@
       #yst2-panel .yst2-candidate-copy small{font-size:10px;color:#a0a5b2}
       #yst2-panel .yst2-candidate-arrow{font-size:22px;color:#a6abba}
 
-      /* Morphe Series Tracker parity: History-style library surface and compact media rows. */
-      #yst2-history-switcher{display:flex;align-items:center;gap:8px;margin:12px 0 16px;padding:0 16px;border-bottom:1px solid var(--yt-spec-10-percent-layer,#e5e5e5);font:500 14px Roboto,Arial,sans-serif}
-      #yst2-history-switcher button{position:relative;min-height:44px;padding:0 14px;border:0;border-radius:0;background:transparent;color:var(--yt-spec-text-secondary,#606060);font:inherit;cursor:pointer}
-      #yst2-history-switcher button[aria-selected="true"]{color:var(--yt-spec-text-primary,#0f0f0f)}
-      #yst2-history-switcher button[aria-selected="true"]:after{content:"";position:absolute;left:12px;right:12px;bottom:0;height:3px;border-radius:3px 3px 0 0;background:var(--yt-spec-call-to-action,#065fd4)}
-      #${PANEL}{position:fixed;inset:0;z-index:999999;width:100vw;height:100dvh;max-height:100dvh;border:0;border-radius:0;background:var(--yt-spec-base-background,#fff);color:var(--yt-spec-text-primary,#0f0f0f);box-shadow:none;font:14px/1.45 Roboto,Arial,sans-serif}
+
+      /* zeroyogurt edition: compact popup with a polished custom identity */
+      #${PANEL}{top:16px;right:16px;bottom:16px;left:auto;width:min(490px,calc(100vw - 32px));height:auto;max-height:calc(100dvh - 32px);border:1px solid #4b3544;border-radius:18px;background:linear-gradient(155deg,#17141d 0%,#111216 48%,#15151d 100%);box-shadow:0 22px 80px #000b,0 0 0 1px #ff66820d;overflow:hidden}
       #${PANEL}.open{display:flex;flex-direction:column}
-      #${PANEL} .yst2-top,#${PANEL} .yst2-dashboard,#${PANEL} .yst2-toolbar,#${PANEL} .yst2-tabs{background:var(--yt-spec-base-background,#fff);border-color:var(--yt-spec-10-percent-layer,#e5e5e5)}
-      #${PANEL} .yst2-top{min-height:58px;padding:6px max(16px,calc((100vw - 1000px)/2))}
-      #${PANEL} .yst2-brand-mark{width:32px;height:32px;border-radius:8px;box-shadow:none}
-      #${PANEL} .yst2-logo{font-size:18px;color:var(--yt-spec-text-primary,#0f0f0f);letter-spacing:0;font-weight:600}
-      #${PANEL} .yst2-tagline{display:none}
-      #${PANEL} .yst2-close{background:transparent;border:0;color:var(--yt-spec-text-primary,#0f0f0f)}
-      #${PANEL} .yst2-dashboard{display:none}
-      #${PANEL} .yst2-toolbar{padding:12px max(16px,calc((100vw - 1000px)/2));border-bottom:1px solid var(--yt-spec-10-percent-layer,#e5e5e5)}
-      #${PANEL} .yst2-primary-actions{gap:8px}
-      #${PANEL} .yst2-mainbtn{background:var(--yt-spec-call-to-action,#065fd4);box-shadow:none;border-radius:18px;color:#fff}
-      #${PANEL} .yst2-subbtn,#${PANEL} .yst2-icon{background:var(--yt-spec-badge-chip-background,#f2f2f2);border:0;color:var(--yt-spec-text-primary,#0f0f0f);box-shadow:none}
-      #${PANEL} .yst2-tabs{padding:0 max(16px,calc((100vw - 1000px)/2));gap:4px;border-bottom:1px solid var(--yt-spec-10-percent-layer,#e5e5e5)}
-      #${PANEL} .yst2-tabs button{border:0;border-radius:0;color:var(--yt-spec-text-secondary,#606060);background:transparent}
-      #${PANEL} .yst2-tabs button.active{color:var(--yt-spec-text-primary,#0f0f0f);background:transparent;border-bottom:3px solid var(--yt-spec-call-to-action,#065fd4)}
-      #${PANEL} .yst2-searchwrap{max-width:968px;width:calc(100% - 32px);margin:16px auto 4px;border-radius:22px;background:var(--yt-spec-badge-chip-background,#f2f2f2);border-color:transparent}
-      #${PANEL} .yst2-searchwrap input{color:var(--yt-spec-text-primary,#0f0f0f)}
-      #${PANEL} .yst2-searchwrap input::placeholder{color:var(--yt-spec-text-secondary,#606060)}
-      #${PANEL} .yst2-content{width:100%;max-width:1000px;margin:0 auto;padding:12px 16px 32px;scrollbar-color:var(--yt-spec-10-percent-layer,#aaa) transparent}
-      #${PANEL} .yst2-series{background:transparent;border:0;border-bottom:1px solid var(--yt-spec-10-percent-layer,#e5e5e5);border-radius:0;padding:14px 0;margin:0;box-shadow:none}
-      #${PANEL} .yst2-series-overview{gap:16px}
-      #${PANEL} .yst2-series-art{width:120px;min-width:120px;aspect-ratio:16/9;border:0;border-radius:8px;background:var(--yt-spec-badge-chip-background,#f2f2f2)}
-      #${PANEL} .yst2-series-art:after{display:none}
-      #${PANEL} .yst2-series-art>span{bottom:5px;left:5px}
-      #${PANEL} .yst2-seriestitle{font-size:14px;font-weight:600;color:var(--yt-spec-text-primary,#0f0f0f)}
-      #${PANEL} .yst2-muted,#${PANEL} .yst2-series-footline{color:var(--yt-spec-text-secondary,#606060)}
-      #${PANEL} .yst2-bar{background:var(--yt-spec-10-percent-layer,#e5e5e5)}
-      #${PANEL} .yst2-bar i{background:var(--yt-spec-call-to-action,#065fd4)}
-      #${PANEL} .yst2-progress-label{color:var(--yt-spec-text-secondary,#606060)}
-      #${PANEL} .yst2-continue{background:var(--yt-spec-badge-chip-background,#f2f2f2);border:0;border-radius:8px;color:var(--yt-spec-text-primary,#0f0f0f)}
-      #${PANEL} .yst2-continue-copy small{color:var(--yt-spec-text-secondary,#606060)}
-      #${PANEL} .yst2-continue-icon{background:var(--yt-spec-call-to-action,#065fd4)}
-      #${PANEL} .yst2-details{border-top:1px solid var(--yt-spec-10-percent-layer,#e5e5e5)}
-      #${PANEL} .yst2-details summary{color:var(--yt-spec-text-primary,#0f0f0f)}
-      #${PANEL} .yst2-ep{border-bottom-color:var(--yt-spec-10-percent-layer,#e5e5e5)}
-      #${PANEL} .yst2-epname{color:var(--yt-spec-text-primary,#0f0f0f)}
-      #${PANEL} .yst2-epname:hover{color:var(--yt-spec-call-to-action,#065fd4)}
-      #${PANEL} .yst2-thumb{border:0;border-radius:8px}
-      #${PANEL} .yst2-footer{background:var(--yt-spec-base-background,#fff);border-color:var(--yt-spec-10-percent-layer,#e5e5e5);color:var(--yt-spec-text-secondary,#606060)}
-      #${PANEL} .yst2-series h3{color:var(--yt-spec-text-primary,#0f0f0f)}
-      #${PANEL} .yst2-setting{color:var(--yt-spec-text-primary,#0f0f0f)}
-      #${PANEL} .yst2-setting select,#${PANEL} .yst2-dialog-input,#${PANEL} .yst2-dialog-select{background:var(--yt-spec-badge-chip-background,#f2f2f2);color:var(--yt-spec-text-primary,#0f0f0f);border-color:var(--yt-spec-10-percent-layer,#e5e5e5)}
-      #${PANEL} .yst2-modal{background:var(--yt-spec-base-background,#fff);color:var(--yt-spec-text-primary,#0f0f0f);border-color:var(--yt-spec-10-percent-layer,#e5e5e5)}
-      #${PANEL} .yst2-modal-head h3,#${PANEL} .yst2-dialog-label{color:var(--yt-spec-text-primary,#0f0f0f)}
-      #${PANEL} .yst2-candidate{background:var(--yt-spec-badge-chip-background,#f2f2f2);color:var(--yt-spec-text-primary,#0f0f0f);border-color:var(--yt-spec-10-percent-layer,#e5e5e5)}
-      @media(max-width:600px){#${PANEL}{inset:0;width:100vw;height:100dvh}#${PANEL} .yst2-toolbar{padding:10px 12px;flex-wrap:wrap}#${PANEL} .yst2-primary-actions{flex-wrap:wrap}#${PANEL} .yst2-data-actions{margin-left:auto}#${PANEL} .yst2-series-art{width:96px;min-width:96px}#${PANEL} .yst2-series-overview{gap:10px}#${PANEL} .yst2-serieshead{flex-wrap:wrap}}
+      #${PANEL} .yst2-top{background:linear-gradient(110deg,#251923 0%,#17151d 58%,#171923 100%);border-bottom:1px solid #49303e;padding:16px 17px 13px}
+      #${PANEL} .yst2-brand-mark{background:linear-gradient(145deg,#ff6682,#a855f7);box-shadow:0 5px 18px #f052813b}
+      #${PANEL} .yst2-logo{background:linear-gradient(90deg,#fff 10%,#ffb4c4 70%,#c4a7ff);-webkit-background-clip:text;background-clip:text;color:transparent}
+      #${PANEL} .yst2-tagline{color:#b5a3b3;letter-spacing:.35px}
+      #${PANEL} .yst2-close{border-radius:10px}
+      #${PANEL} .yst2-close:hover{background:#392632;color:#ffb4c4}
+      #${PANEL} .yst2-dashboard{background:linear-gradient(180deg,#1b1821,#17171e);border-bottom:1px solid #302a37}
+      #${PANEL} .yst2-metric{border:1px solid #39313e;background:linear-gradient(145deg,#26202c,#1d1c25);border-radius:12px}
+      #${PANEL} .yst2-metric strong{color:#ffb1c2}
+      #${PANEL} .yst2-overall-progress{border-color:#39313e}
+      #${PANEL} .yst2-bar i{background:linear-gradient(90deg,#ff6682,#bd78f6)}
+      #${PANEL} .yst2-toolbar{background:#15151c;border-bottom:1px solid #302a37}
+      #${PANEL} .yst2-mainbtn{background:linear-gradient(105deg,#f04f78,#c04fba);box-shadow:0 4px 14px #e34f852e}
+      #${PANEL} .yst2-mainbtn:hover{filter:brightness(1.1);transform:translateY(-1px)}
+      #${PANEL} .yst2-subbtn,#${PANEL} .yst2-icon{background:#282530;border:1px solid #393340;color:#eeeaf3}
+      #${PANEL} .yst2-subbtn:hover,#${PANEL} .yst2-icon:hover{background:#382b3b;border-color:#76506b}
+      #${PANEL} .yst2-tabs{background:#15151c;border-bottom:1px solid #302a37}
+      #${PANEL} .yst2-tabs button.active{color:#ffb2c4;border-bottom-color:#f46b94}
+      #${PANEL} .yst2-tab-count{background:#342331;color:#f5b4cb}
+      #${PANEL} .yst2-searchwrap{background:#24212b;border:1px solid #393340;border-radius:11px}
+      #${PANEL} .yst2-searchwrap:focus-within{border-color:#bd6c9c;box-shadow:0 0 0 3px #e65b9020}
+      #${PANEL} .yst2-series{border-color:#34303a;background:linear-gradient(145deg,#1c1b23,#191820);border-radius:13px}
+      #${PANEL} .yst2-series:hover{border-color:#5c4057}
+      #${PANEL} .yst2-series-art{border-color:#4b394b}
+      #${PANEL} .yst2-continue{background:linear-gradient(110deg,#29212e,#24212b);border:1px solid #443447}
+      #${PANEL} .yst2-continue-icon{background:linear-gradient(145deg,#ff6682,#bd78f6)}
+      #${PANEL} .yst2-footer{background:#121219;border-top:1px solid #302a37}
+      #${PANEL} .yst2-footer .yst2-credit{color:#d7a8c5;font-weight:650;letter-spacing:.15px;white-space:nowrap}
+      #${PANEL} .yst2-footer .yst2-credit-mark{color:#f47a9d}
+      #${PANEL} .yst2-modal{background:#201c27;border:1px solid #594254;box-shadow:0 20px 60px #000b}
+      #${PANEL} .yst2-modal-head{border-bottom-color:#443443}
+      #${PANEL} .yst2-modal-head h3{color:#fff}
+      #${PANEL} .yst2-candidate{background:#292430;border-color:#443747}
+      #${PANEL} button:focus-visible,#${PANEL} input:focus-visible,#${PANEL} select:focus-visible{outline-color:#ff82a2}
+      @media(max-width:600px){#${PANEL}{top:8px;right:8px;bottom:8px;width:calc(100vw - 16px);max-height:calc(100dvh - 16px);border-radius:15px}#${PANEL} .yst2-toolbar{padding:10px;flex-wrap:wrap}#${PANEL} .yst2-primary-actions{flex-wrap:wrap}#${PANEL} .yst2-footer{gap:6px;flex-wrap:wrap}}
         `;document.head.appendChild(st);
   }
   function trackCurrentVideo() {
