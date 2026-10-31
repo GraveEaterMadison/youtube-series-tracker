@@ -4,9 +4,9 @@
 
 **Install:** [YouTube Series Tracker on Greasy Fork](https://greasyfork.org/en/scripts/601970-youtube-series-tracker) · [Raw userscript source](https://raw.githubusercontent.com/GraveEaterMadison/youtube-series-tracker/feature/morphe-style-auto-follow/youtube-series-tracker.user.js)
 
-A local-first Firefox userscript for tracking YouTube playlists as series: episode progress, a series library, continue-watching, history matching, and backup/restore.
+A local-first Firefox userscript for tracking YouTube playlists as series: episode progress, a series library, continue-watching, History matching, and backup/restore. This is an independent browser adaptation of concepts and behaviour from [thryyy/morphe-series-tracker](https://github.com/thryyy/morphe-series-tracker), which is based on [Morphe Patches](https://github.com/MorpheApp/morphe-patches).
 
-> **Project status: beta.** YouTube's internal page structures can change without notice.
+> **Project status: beta.** YouTube's internal page structures can change without notice. This modified version is distributed under GPL-3.0-only; see [LICENSE](LICENSE) and the required [NOTICE](NOTICE).
 
 ## Features
 
