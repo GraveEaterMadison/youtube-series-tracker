@@ -35,7 +35,7 @@ test('version and Greasy Fork listing metadata are complete and consistent', () 
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   const version = source.match(/^\/\/ @version\s+(.+)$/m)?.[1]?.trim();
   assert.equal(version, pkg.version);
-  assert.match(source, /^\/\/ @license\s+MIT$/m);
+  assert.match(source, /^\/\/ @license\s+GPL-3\.0-only$/m);
   assert.match(source, /^\/\/ @homepageURL\s+https:\/\/github\.com\/GraveEaterMadison\/youtube-series-tracker$/m);
   assert.match(source, /^\/\/ @supportURL\s+https:\/\/github\.com\/GraveEaterMadison\/youtube-series-tracker\/issues$/m);
 });
@@ -57,7 +57,7 @@ test('sidebar button relocates when YouTube navigation loads after the userscrip
 });
 
 test('one-by-one series builder actions are wired and versioned', () => {
-  assert.match(source, /^\/\/ @version\s+2\.8\.0$/m);
+  assert.match(source, /^\/\/ @version\s+2\.9\.0$/m);
   assert.match(source, /id="yst2-add-current"/);
   assert.match(source, /function showAddVideoDialog\(\)/);
   assert.match(source, /function saveVideoToSeries\(series, meta\)/);
@@ -750,6 +750,63 @@ test('History page gets a non-destructive Series entry point', () => {
   assert.match(source, /activeTab='library'; openPanel\(\)/);
 });
 
+
+
+
+test('recording consent is bound to a known active YouTube account', () => {
+  const allows = vm.runInNewContext('(' + extractSimpleFunction(source, 'accountConsentAllows') + ')');
+  assert.equal(allows(true, '', ''), false);
+  assert.equal(allows(true, 'account-a', ''), false);
+  assert.equal(allows(true, 'account-a', 'account-b'), false);
+  assert.equal(allows(false, 'account-a', 'account-a'), false);
+  assert.equal(allows(true, 'account-a', 'account-a'), true);
+  assert.match(source, /function accountIdentitySource\(\)/);
+  assert.match(source, /DATASYNC_ID/);
+  assert.match(source, /crypto\.subtle\.digest\('SHA-256'/);
+  assert.match(source, /privacy\.consentAccount === activeAccountDigest/);
+});
+
+test('YouTube History sync is separate opt-in and account-scoped', () => {
+  assert.match(source, /id="yst2-sync-youtube"/);
+  assert.match(source, /function syncYouTubeHistory\(force = false\)/);
+  assert.match(source, /credentials: 'same-origin'/);
+  assert.match(source, /browseId: 'FEhistory'/);
+  assert.match(source, /privacy\.syncAccount === activeAccountDigest/);
+  assert.match(source, /YouTube account changed; History sync was stopped/);
+  assert.match(source, /clearedProgressAt/);
+  assert.match(source, /function historyAccountState\(\)/);
+});
+
+test('History API parser reads only video renderers and does not invent resume positions', () => {
+  const walk = (value, fn) => {
+    if (!value || typeof value !== 'object') return;
+    fn(value);
+    if (Array.isArray(value)) { for (const item of value) walk(item, fn); return; }
+    for (const key of Object.keys(value)) walk(value[key], fn);
+  };
+  const rendererText = value => value?.simpleText || '';
+  const parseDuration = value => {
+    const parts = String(value || '').split(':').map(Number);
+    return parts.reduce((total, part) => total * 60 + part, 0);
+  };
+  const parse = vm.runInNewContext('(' + extractSimpleFunction(source, 'historyApiRows') + ')', {
+    walk, rendererText, parseDuration, Map, String, Number
+  });
+  const result = parse({
+    contents: [{ videoRenderer: {
+      videoId: 'aaaaaaaaaaa',
+      title: {simpleText:'Episode 1'},
+      lengthText: {simpleText:'10:00'},
+      thumbnailOverlays: [{thumbnailOverlayProgressBarRenderer:{percentDurationWatched:92}}]
+    }}],
+    continuationContents: {continuations:[{nextContinuationData:{continuation:'next-page'}}]}
+  });
+  assert.equal(result.rows.get('aaaaaaaaaaa').percent, 92);
+  assert.equal(result.rows.get('aaaaaaaaaaa').duration, 600);
+  assert.equal(result.rows.get('aaaaaaaaaaa').title, 'Episode 1');
+  assert.equal(Object.hasOwn(result.rows.get('aaaaaaaaaaa'), 'position'), false);
+  assert.equal(result.continuation, 'next-page');
+});
 
 
 test('History scanning automatically picks up newly loaded rows while scrolling', () => {
