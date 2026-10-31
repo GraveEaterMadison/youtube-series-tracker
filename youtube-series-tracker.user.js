@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Series Tracker
 // @namespace    https://github.com/GraveEaterMadison/youtube-series-tracker
-// @version      2.9.0
+// @version      2.10.0
 // @description  Follow YouTube playlists as series with guided setup, local progress, resume planning, History matching, and validated backup/restore.
 // @author       Zero
 // @license      GPL-3.0-only
@@ -63,6 +63,7 @@
   let historyObserver = null;
   let historyObserverRoot = null;
   let historyScanTimer = null;
+  let keyboardShortcutsBound = false;
 
 
   function loadPrivacy() {
@@ -1889,7 +1890,7 @@
     p.innerHTML = `<header class="yst2-top">
         <div class="yst2-brand-row"><div class="yst2-brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M23.5 6.2a3 3 0 0 0-2.1-2.1C19.5 3.6 12 3.6 12 3.6s-7.5 0-9.4.5A3 3 0 0 0 .5 6.2C0 8.1 0 12 0 12s0 3.9.5 5.8a3 3 0 0 0 2.1 2.1c1.9.5 9.4.5 9.4.5s7.5 0 9.4-.5a3 3 0 0 0 2.1-2.1C24 15.9 24 12 24 12s0-3.9-.5-5.8ZM9.6 15.6V8.4L15.9 12l-6.3 3.6Z"/></svg></div>
           <div><div class="yst2-logo">Series Tracker</div><div class="yst2-tagline">Your YouTube, in order.</div></div></div>
-        <button id="yst2-close" class="yst2-icon yst2-close" aria-label="Close tracker" title="Close">×</button>
+        <button id="yst2-close" class="yst2-icon yst2-close" aria-label="Close tracker" title="Close tracker (Esc)">×</button>
       </header>
       <section id="yst2-dashboard" class="yst2-dashboard" aria-label="Your tracking overview">
         <div class="yst2-metric"><span>Series</span><strong>${db.series.length}</strong></div>
@@ -2954,8 +2955,27 @@
   function openFromPlayer() {
     followSeriesFromPlayer();
   }
+  function handleTrackerKeyboardShortcuts(event) {
+    const panel = document.getElementById(PANEL);
+    if (event.key === 'Escape') {
+      if (!panel?.classList.contains('open')) return;
+      if (event.target?.closest?.('.yst2-modal-backdrop')) return;
+      closePanel();
+      return;
+    }
+    if (!(event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey) || String(event.key || '').toLowerCase() !== 'y') return;
+    const target = event.target;
+    if (target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(String(target?.tagName || '')) || target?.getAttribute?.('role') === 'textbox') return;
+    event.preventDefault();
+    togglePanel();
+  }
+
   function ensureUI() {
     addStyles();
+    if (!keyboardShortcutsBound) {
+      document.addEventListener('keydown', handleTrackerKeyboardShortcuts);
+      keyboardShortcutsBound = true;
+    }
     if(!document.getElementById(PANEL)){const p=document.createElement('aside');p.id=PANEL;document.body.appendChild(p);}
     addSidebarButton();
     addPlayerButton();
