@@ -846,7 +846,7 @@ test('History scanning automatically picks up newly loaded rows while scrolling'
   assert.match(source, /setTimeout\(\(\) => \{/);
   assert.match(source, /scanHistoryPage\(true\)/);
   assert.match(source, /if \(changed\) saveDB\(\)/);
-  assert.match(source, /Newly loaded History entries are rescanned automatically as you scroll/);
+  assert.match(source, /Newly loaded History entries are scanned automatically as you scroll/);
 });
 
 test('automatic playback recording is explicitly opt-in by default', () => {
