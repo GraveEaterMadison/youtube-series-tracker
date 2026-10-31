@@ -3241,9 +3241,15 @@
     if (nextVideoId === owned.videoId && incomingOccurrence?.order === Number(owned.order)) return false;
     const episodes = orderedEpisodes(series).filter(ep => ep.available !== false && !ep.unavailable && /^[A-Za-z0-9_-]{11}$/.test(ep.id));
     const currentIndex = episodes.findIndex(ep => ep.id === owned.videoId && ep.order === Number(owned.order));
+    const previous = currentIndex > 0 ? episodes[currentIndex - 1] : null;
     const expected = currentIndex >= 0 ? episodes[currentIndex + 1] : null;
+    if (previous && nextVideoId === previous.id && incomingOccurrence?.order === previous.order) {
+      activePlaybackSession = { seriesId: series.id, videoId: previous.id, order: previous.order, catalogRevision: Number(series.catalogRevision) || 0 };
+      writeSeriesPlaybackSession(activePlaybackSession);
+      return false;
+    }
     if (!expected) { clearSeriesPlaybackSession(); return false; }
-    if (nextVideoId === expected.id) {
+    if (nextVideoId === expected.id && incomingOccurrence?.order === expected.order) {
       activePlaybackSession = { seriesId: series.id, videoId: expected.id, order: expected.order, catalogRevision: Number(series.catalogRevision) || 0 };
       writeSeriesPlaybackSession(activePlaybackSession);
       return false;
